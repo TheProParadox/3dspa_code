@@ -65,16 +65,27 @@ def compute_aj_scores(coords_3d, visibs, conf_pred):
     aj_scores = aj_scores * (0.7 + 0.3 * conf_normalized)
     aj_scores = np.clip(aj_scores, 0.1, 1.0)
     aj_scores = adjust_half_scores(aj_scores)
-
     return aj_scores
 
 
 def score_to_color(score, vmin=0.0, vmax=1.0):
-    """Blue = good (high score), Red = bad (low score)"""
+    """
+    Red (0) → White (0.5) → Blue (1)
+    Ensures mid score = pure white.
+    """
     normalized = np.clip((score - vmin) / (vmax - vmin + 1e-8), 0, 1)
-    b = int(255 * normalized)        # Blue increases with score
-    g = 0
-    r = int(255 * (1.0 - normalized))  # Red decreases with score
+
+    if normalized < 0.5:
+        t = normalized / 0.5
+        r = 255
+        g = int(255 * t)
+        b = int(255 * t)
+    else:
+        t = (normalized - 0.5) / 0.5
+        r = int(255 * (1 - t))
+        g = int(255 * (1 - t))
+        b = 255
+    
     return (b, g, r)
 
 
@@ -90,7 +101,6 @@ def create_score_colored_video(
     H, W = video_np.shape[1:3]
     frames_out = []
 
-    # ✅ FIX 1: ensure uint8 RGB format correctly
     if video_np.dtype != np.uint8:
         if video_np.max() <= 1.0:
             video_np = (video_np * 255).clip(0, 255).astype(np.uint8)
@@ -102,30 +112,22 @@ def create_score_colored_video(
         frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
         for n in range(N):
-            if not visibility[t, n]:
-                continue
             current_score = scores[t, n]
             color = score_to_color(current_score)
             
-            # Draw trajectory tail with fading
             start_idx = max(0, t - trace_length)
             for tt in range(start_idx, t):
-                if not visibility[tt, n] or not visibility[tt + 1, n]:
-                    continue
                 pt1 = (int(tracks_2d[tt, n, 0]), int(tracks_2d[tt, n, 1]))
                 pt2 = (int(tracks_2d[tt + 1, n, 0]), int(tracks_2d[tt + 1, n, 1]))
                 
-                # Fade older parts
                 age_factor = (tt - start_idx) / max(1, trace_length)
                 alpha = 0.3 + 0.7 * age_factor
                 overlay = frame.copy()
                 cv2.line(overlay, pt1, pt2, color, line_thickness)
                 cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
             
-            # Draw current point
             pt = (int(tracks_2d[t, n, 0]), int(tracks_2d[t, n, 1]))
             cv2.circle(frame, pt, point_radius, color, -1)
-            cv2.circle(frame, pt, point_radius + 1, (255, 255, 255), 1)
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frames_out.append(frame_rgb)
@@ -137,15 +139,15 @@ def create_score_colored_video(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run SpaTrack on ball points from MP4 video")
-    parser.add_argument("video_path", type=str, help="Path to MP4 video file")
-    parser.add_argument("--output_dir", type=str, default=None, help="Output directory")
+    parser.add_argument("video_path", type=str)
+    parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--num_points", type=int, default=2048)
     parser.add_argument("--vo_points", type=int, default=756)
     parser.add_argument("--fps", type=int, default=1)
     parser.add_argument("--output_fps", type=int, default=3)
     parser.add_argument("--track_mode", type=str, default="offline", choices=['offline', 'online'])
     parser.add_argument("--sam_model", type=str, default="vit_h")
-    parser.add_argument("--click", type=int, nargs=2, metavar=('X', 'Y'))
+    parser.add_argument("--click", type=int, nargs=2)
     parser.add_argument("--mask_path", type=str, default=None)
     parser.add_argument("--save_mask", action="store_true")
     parser.add_argument("--points_file", type=str, default=None)
@@ -164,19 +166,22 @@ if __name__ == "__main__":
 
     print("[cyan]Loading video...[/cyan]")
     video_reader = decord.VideoReader(str(video_path))
-    video_np = video_reader.get_batch(range(len(video_reader))).asnumpy()  # [T,H,W,3] RGB
+    
+    total = len(video_reader)
+    indices = list(range(0, total, 5))
+    video_np = video_reader.get_batch(indices).asnumpy()
 
-    # ✅ FIX 2: normalize to [0,1]
+    print(f"[green]Using {len(indices)} frames out of {total} (step=3)[/green]")
+
     video_tensor = torch.from_numpy(video_np).permute(0, 3, 1, 2).float() / 255.0
     video_tensor = video_tensor[::args.fps]
 
-    print(f"[green]✅ Loaded video: {video_tensor.shape[0]} frames, {video_tensor.shape[2]}x{video_tensor.shape[3]}[/green]")
+    print(f"[green]✅ Loaded video: {video_tensor.shape[0]} frames[/green]")
 
-    print("\n[cyan]Loading VGGT4Track model for depth/pose estimation...[/cyan]")
+    print("\n[cyan]Loading VGGT4Track...[/cyan]")
     vggt4track_model = VGGT4Track.from_pretrained("Yuxihenry/SpatialTrackerV2_Front")
     vggt4track_model.eval().to("cuda")
 
-    # ✅ FIX 3: don't divide by 255 again
     video_tensor_preprocessed = preprocess_image(video_tensor)[None]
 
     with torch.no_grad():
@@ -190,23 +195,32 @@ if __name__ == "__main__":
     intrs = intrinsic.squeeze().cpu().numpy()
     video_tensor = video_tensor_preprocessed.squeeze()
     unc_metric = depth_conf.squeeze().cpu().numpy() > 0.5
-    print(f"[green]✅ Depth and poses computed[/green]")
 
-    # Get query points - either from file or use default
+    print(f"[green]✅ Depth & poses computed[/green]")
+
+    # ---------------------------------------------------------
+    #  RANDOM POINT GENERATION (256 points)
+    # ---------------------------------------------------------
     if args.points_file and os.path.exists(args.points_file):
-        print(f"\n[bold cyan]Loading points from {args.points_file}...[/bold cyan]")
+        print(f"[cyan]Loading points from {args.points_file}...[/cyan]")
         xy_points = np.loadtxt(args.points_file, dtype=int)
         if xy_points.ndim == 1:
             xy_points = xy_points.reshape(1, -1)
-        print(f"[green]✅ Loaded {len(xy_points)} points[/green]")
-        grid_pts = torch.from_numpy(xy_points).float().unsqueeze(0)
-        query_xyt = torch.cat([torch.zeros_like(grid_pts[:, :, :1]), grid_pts], dim=2)[0].numpy()
+        print(f"[green]Loaded {len(xy_points)} points[/green]")
     else:
-        # Default: let model auto-generate points
-        query_xyt = None
-        print("[yellow]⚠️  No points file provided, using model's default point generation[/yellow]")
+        print("[yellow]⚠️ No points file — generating 256 random points[/yellow]")
+        NUM_RANDOM_POINTS = 256
+        H, W = video_np.shape[1:3]
+        xs = np.random.randint(0, W, size=(NUM_RANDOM_POINTS, 1))
+        ys = np.random.randint(0, H, size=(NUM_RANDOM_POINTS, 1))
+        xy_points = np.hstack([xs, ys]).astype(np.float32)
+        print(f"[green]Generated 256 random points[/green]")
 
-    print(f"\n[bold cyan]Loading SpaTrack ({args.track_mode} mode)...[/bold cyan]")
+
+    # grid_pts: [1, N, 2]
+    grid_pts = torch.from_numpy(xy_points).float().unsqueeze(0)
+    query_xyt = torch.cat([torch.zeros_like(grid_pts[:, :, :1]), grid_pts], dim=2)[0].numpy()
+    print(f"\n[cyan]Loading SpaTrack ({args.track_mode})...[/cyan]")
     if args.track_mode == "offline":
         model = Predictor.from_pretrained("Yuxihenry/SpatialTrackerV2-Offline")
     else:
@@ -215,61 +229,63 @@ if __name__ == "__main__":
     model.spatrack.track_num = args.vo_points
     model.eval().to("cuda")
 
-    print(f"\n[bold cyan]Running SpaTrack inference...[/bold cyan]")
+    print("\n[cyan]Running SpaTrack inference...[/cyan]")
     with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
         (
             c2w_traj, intrs_out, point_map, conf_depth,
             track3d_pred, track2d_pred, vis_pred, conf_pred, video
-        ) = model.forward(video_tensor, depth=depth_tensor,
-                          intrs=intrs, extrs=extrs,
-                          queries=query_xyt, fps=1, full_point=False,
-                          iters_track=4, query_no_BA=True,
-                          fixed_cam=False, stage=1,
-                          unc_metric=unc_metric,
-                          support_frame=len(video_tensor)-1,
-                          replace_ratio=0.2)
+        ) = model.forward(
+            video_tensor, depth=depth_tensor,
+            intrs=intrs, extrs=extrs,
+            queries=query_xyt, fps=1, full_point=False,
+            iters_track=4, query_no_BA=True,
+            fixed_cam=False, stage=1,
+            unc_metric=unc_metric,
+            support_frame=len(video_tensor)-1,
+            replace_ratio=0.2
+        )
 
-        # Resize if needed
         max_size = 336
         h, w = video.shape[2:]
         scale = min(max_size / h, max_size / w)
         if scale < 1:
             new_h, new_w = int(h * scale), int(w * scale)
             resize_fn = T.Resize((new_h, new_w))
-            
-            # Resize 4D tensors [T, C, H, W]
             video = torch.stack([resize_fn(f) for f in video])
             video_tensor = torch.stack([resize_fn(f) for f in video_tensor])
             point_map = torch.stack([resize_fn(f) for f in point_map])
-            
-            # Resize conf_depth - handle both [T, H, W] and [T, C, H, W] shapes
-            if conf_depth.ndim == 3:  # [T, H, W]
+            if conf_depth.ndim == 3:
                 conf_depth = torch.stack([resize_fn(f.unsqueeze(0)).squeeze(0) for f in conf_depth])
-            else:  # [T, C, H, W]
+            else:
                 conf_depth = torch.stack([resize_fn(f) for f in conf_depth])
-            
             track2d_pred[..., :2] *= scale
             intrs_out[:, :2, :] *= scale
 
-        coords_3d_world = (torch.einsum("tij,tnj->tni", c2w_traj[:, :3, :3],
-                                        track3d_pred[:, :, :3].cpu()) + c2w_traj[:, :3, 3][:, None, :]).numpy()
+        coords_3d_world = (
+            torch.einsum("tij,tnj->tni", c2w_traj[:, :3, :3],
+                          track3d_pred[:, :, :3].cpu())
+            + c2w_traj[:, :3, 3][:, None, :]
+        ).numpy()
+
         visibs_np = vis_pred.cpu().numpy()
         conf_np = conf_pred.cpu().numpy()
 
         aj_scores = compute_aj_scores(coords_3d_world, visibs_np, conf_np)
-        print(f"[green]✅ AJ scores computed — mean {aj_scores.mean():.3f}[/green]")
+        print(f"[green]AJ score mean: {aj_scores.mean():.3f}[/green]")
 
-        video_rgb = (video.permute(0, 2, 3, 1).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        video_rgb = (video.permute(0, 2, 3, 1).cpu().numpy() * 255).clip(0,255).astype(np.uint8)
         tracks_2d_np = track2d_pred[..., :2].cpu().numpy()
         vis_np = vis_pred.cpu().numpy().astype(bool)
+        vis_np[:, :] = True
 
         out_path = str(output_dir / "ball_tracking_pred_track.mp4")
-        create_score_colored_video(video_rgb, tracks_2d_np, vis_np, aj_scores,
-                                   fps=args.output_fps, output_path=out_path,
-                                   trace_length=5, point_radius=4, line_thickness=2)
+        create_score_colored_video(
+            video_rgb, tracks_2d_np, vis_np, aj_scores,
+            fps=args.output_fps, output_path=out_path,
+            trace_length=5, point_radius=4, line_thickness=2
+        )
 
-        # Save results to NPZ
-        print("[cyan]Saving results to NPZ...[/cyan]")
+        print("[cyan]Saving NPZ...[/cyan]")
         data_save = {}
         data_save["coords"] = coords_3d_world
         data_save["extrinsics"] = torch.inverse(c2w_traj).cpu().numpy()
@@ -281,12 +297,11 @@ if __name__ == "__main__":
         data_save["visibs"] = vis_pred.cpu().numpy()
         data_save["unc_metric"] = conf_depth.cpu().numpy()
         data_save["coords_score"] = aj_scores
-        
-        if args.points_file and os.path.exists(args.points_file):
-            data_save["ball_query_points"] = xy_points
+
+        data_save["ball_query_points"] = xy_points
         
         output_path = output_dir / 'result_ball_only.npz'
         np.savez(str(output_path), **data_save)
 
-        print(f"[green]✅ Output video saved: {out_path}[/green]")
-        print(f"[green]✅ NPZ file saved: {output_path}[/green]")
+        print(f"[green]Output video saved: {out_path}[/green]")
+        print(f"[green]NPZ file saved: {output_path}[/green]")
