@@ -1,4 +1,4 @@
-"""3DSPA: 3D Semantic Point Autoencoder extending TRAJAN."""
+"""Official code of 3d track autoencoder"""
 
 from __future__ import annotations
 
