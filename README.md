@@ -27,6 +27,10 @@ pip install -r requirements.txt
 # Clone tapnet and add to PYTHONPATH:
 git clone https://github.com/google-deepmind/tapnet.git
 export PYTHONPATH="${PYTHONPATH}:$(pwd)/tapnet"
+
+# For inference: 2D point tracking
+# CoTracker3
+pip install cotracker
 ```
 
 ## Files
@@ -35,6 +39,7 @@ export PYTHONPATH="${PYTHONPATH}:$(pwd)/tapnet"
 - `track_autoencoder_3d.py`: 3DSPA model (3D point track autoencoder with semantic features)
 - `attention.py`: Transformer attention modules
 - `train.py`: Training script with WandB integration
+- `inference.py`: Inference script for single videos with DINOv2 and VideoDepthAnything
 - `evaluate_tapvid3d.py`: TAPVid-3D evaluation script
 - `data_loader.py`: Data loading utilities
 
@@ -55,6 +60,50 @@ python train.py \
   --use_dino=True \
   --use_depth=True
 ```
+
+## Inference
+
+### Running Inference on a Video
+
+The inference script processes a single video with DINOv2 and VideoDepthAnything:
+
+```bash
+python inference.py \
+  --checkpoint_path=./checkpoints/3dspa/checkpoint_100000 \
+  --video_path=./data/example_video.mp4 \
+  --output_dir=./inference_output \
+  --use_dino=True \
+  --use_depth=True \
+  --num_query_points=512 \
+  --num_support_tracks=2048 \
+  --tracking_grid_size=64 \
+  --vda_model_path=./checkpoints/depth_anything_vitb14.pth
+```
+
+**Features:**
+- Dense 2D point tracking using CoTracker3 with configurable grid size
+- DINOv2 semantic feature extraction with bilinear interpolation for track sampling
+- VideoDepthAnything depth estimation with bilinear interpolation
+- Automatic 2D to 3D lifting using depth maps and camera intrinsics
+- Full 3DSPA inference pipeline with support/query track splitting
+- Checkpoint loading with parameter structure validation
+
+**Output:**
+- `predictions.npz`: Contains predicted 3D tracks, visibility logits, and ground truth tracks
+- `video_info.txt`: Video metadata (FPS, frame count, etc.)
+
+**Dependencies:**
+- **CoTracker3**: For 2D point track extraction
+  - Install: `pip install cotracker`
+  - Alternatively, use BootsTAPIR from tapnet repository
+- **DINOv2**: For semantic feature extraction
+  - Automatically installed via `transformers` package
+  - Uses `facebook/dinov2-base` model by default
+  - Can specify different model with `--dino_model` flag
+- **VideoDepthAnything**: For depth estimation
+  - Install: `git clone https://github.com/DepthAnything/VideoDepthAnything.git`
+  - Download model checkpoint (e.g., `depth_anything_vitb14.pth`)
+  - Specify path with `--vda_model_path` or place in `checkpoints/` directory
 
 ## Evaluation
 
@@ -84,14 +133,14 @@ python evaluate_tapvid3d.py \
 
 ## Data Format
 
-### Training Data (Kubric3D for 3DSPA)
+### Training Data (Kubric3D + TAPVid-3D for 3DSPA)
 - `video`: [T, H, W, 3] RGB frames
 - `tracks_3d`: [N, T, 3] 3D point tracks (x, y, z)
 - `visible`: [N, T, 1] visibility flags
 - `dino_features`: [N, T, 768] optional DINOv2 features
 - `depth_features`: [N, T, 256] optional depth features
 
-### Evaluation Data (TAPVid-3D)
+### Evaluation Data (TAPVid-3D Minival)
 - `video`: [T, H, W, 3] RGB frames
 - `query_points`: [Q, 4] (t, x, y, z) query points
 - `query_tracks`: [Q, T, 3] ground truth 3D tracks

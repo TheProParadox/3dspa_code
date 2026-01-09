@@ -1,22 +1,40 @@
+# Core dependencies
 jax>=0.4.20
 jaxlib>=0.4.20
 flax>=0.7.5
 optax>=0.1.7
 numpy>=1.24.0
 einops>=0.7.0
+
+# Training and evaluation
 wandb>=0.15.0
 tensorflow>=2.13.0
 tensorflow-datasets>=4.9.0
 tqdm>=4.66.0
+
+# Data processing
 pillow>=10.0.0
 scipy>=1.11.0
+
+# Utilities
 absl-py>=2.0.0
 ml-collections>=0.1.1
 chex>=0.1.7
-# Install tapnet by cloning: git clone https://github.com/google-deepmind/tapnet.git
+
+# TAPVid-3D evaluation (from tapnet repository)
+# Clone tapnet: git clone https://github.com/google-deepmind/tapnet.git
+# Add to PYTHONPATH: export PYTHONPATH="${PYTHONPATH}:$(pwd)/tapnet"
+
+# DINOv2 for semantic features
 torch>=2.0.0
 torchvision>=0.15.0
 transformers>=4.30.0
 
-# Install VideoDepthAnything separately if needed
-# See: https://github.com/DepthAnything/VideoDepthAnything
+# VideoDepthAnything for depth estimation
+# Install from: https://github.com/DepthAnything/VideoDepthAnything
+# Or use: pip install git+https://github.com/DepthAnything/VideoDepthAnything.git
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+
+# For video processing
+imageio-ffmpeg>=0.4.9
