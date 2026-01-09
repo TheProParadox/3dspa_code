@@ -1,116 +1,114 @@
-# SpatialTrackerV2: 3D Point Tracking Made Easy
+# 3DSPA: 3D Semantic Point Autoencoder
 
-**[CAD&CG, Zhejiang University](https://github.com/zju3dv)**; **[University of Oxford](https://www.robots.ox.ac.uk/~vgg/)**; **[Ant Research](https://www.antresearch.com/)**; **[Pixelwise AI](http://pixelwise.ai/)**; **[Bytedance Seed](https://seed.bytedance.com/zh/)**
+> ⚠️ **This repository is under construction** 
 
-[Yuxi Xiao](https://henry123-boy.github.io/), [Jianyuan Wang](https://jytime.github.io/), [Nan Xue](https://xuenan.net/), [Nikita Karaev](https://nikitakaraevv.github.io/), [Iurii Makarov](https://linkedin.com/in/lvoursl), [Bingyi Kang](https://bingykang.github.io/), [Xing Zhu](https://openreview.net/profile?id=~Xing_Zhu2), [Hujun Bao](http://www.cad.zju.edu.cn/home/bao/), [Yujun Shen](https://shenyujun.github.io/), [Xiaowei Zhou](https://www.xzhou.me/)
+This repository contains the implementation of **3DSPA** (3D Semantic Point Autoencoder), a framework for evaluating video realism using semantic-aware 3D point trajectories. 3DSPA extends TRAJAN to 3D by integrating DINOv2 semantic features and depth information, enabling robust assessments of realism, temporal consistency, and physical plausibility in generated videos.
 
-```bibtex
-@inproceedings{xiao2025spatialtrackerv2,
-      title={SpatialTrackerV2: 3D Point Tracking Made Easy}, 
-      author={Yuxi Xiao and Jianyuan Wang and Nan Xue and Nikita Karaev and Yuri Makarov and Bingyi Kang and Xing Zhu and Hujun Bao and Yujun Shen and Xiaowei Zhou},
-      year={2025},
-      booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision},
-      url={https://arxiv.org/abs/2507.12462}, 
-}
+## Status
+
+- [x] Training code implemented
+- [x] Model weights released
+- [x] TAPVid-3D evaluation implemented
+- [ ] Other evaluations (VideoPhy-2, EvalCrafter, IntPhys2) remaining
+- [ ] Visualization tools remaining
+- [ ] Colab demo remaining
+
+## Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/bchandna/3dspa_code.git
+cd 3dspa_code
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Note: TAPVid-3D evaluation requires tapnet repository
+# Clone tapnet and add to PYTHONPATH:
+git clone https://github.com/google-deepmind/tapnet.git
+export PYTHONPATH="${PYTHONPATH}:$(pwd)/tapnet"
 ```
 
+## Files
 
-### [Project Page](https://spatialtracker.github.io/) | [BibTeX]() | [Google Drive](https://drive.google.com/drive/u/1/folders/1GYeC639gA23N_OiytGHXTUCSYrbM0pOo?dmr=1&ec=wgc-drive-globalnav-goto) 
-<!-- <a target="_blank" href="">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-  </a>
--->
-<a href="https://arxiv.org/abs/2507.12462"><img src="https://img.shields.io/badge/arXiv-2507.12462-b31b1b" alt="arXiv"></a>
-<a href="https://huggingface.co/spaces/Yuxihenry/SpatialTrackerV2">
-  <img alt="Spaces" src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue">
-</a>
-<img alt="Visitors" src="https://visitor-badge.laobi.icu/badge?page_id=henry123-boy.SpaTrackerV2&left_color=green&right_color=red">
+- `track_autoencoder.py`: TRAJAN model (2D point track autoencoder)
+- `track_autoencoder_3d.py`: 3DSPA model (3D point track autoencoder with semantic features)
+- `attention.py`: Transformer attention modules
+- `train.py`: Training script with WandB integration
+- `evaluate_tapvid3d.py`: TAPVid-3D evaluation script
+- `data_loader.py`: Data loading utilities
 
+## Training
 
-<img width="1100" src="./assets/teaser_1.png" />
+### 3DSPA Training
 
-
-## 📰 Latest Updates & News
-
-- **[July 17, 2025]**: Our paper is on [arXiv](https://arxiv.org/abs/2507.12462)
-- **[June 27, 2025]**: SpatialTrackerV2 accepted by ICCV 2025
-- **[June 23, 2025]**: Huggingface Space Demo launched! Try it out: 🤗 [Huggingface Space](https://huggingface.co/spaces/Yuxihenry/SpatialTrackerV2)
-
-## TODO List
-   - [x] Release quick start of `SpaTrack2-offline` 
-   - [x] Final version of Paper at [PAPER.md](./docs/PAPER.md)
-   - [ ] Release `SpaTrack2-online`
-   - [ ] Training & Evaluation Codes.
-   - [ ] More supports for other Depth Model, *e.g.*, `DepthAnything`, `StereoFoundation`, `UniDepth`, `Metric3D`.
-   - [ ] `Ceres Python Bindings` designed for SpatialTracker and Dynamic Reconstruction.
-
-## Set up the environment
-To set up the environment for running the SpaTrack model, follow these steps:
-
-1. **Clone the Repository:**
-   ```bash
-   # clone the code
-   git clone https://github.com/henry123-boy/SpaTrackerV2.git
-   cd SpaTrackerV2
-   
-   # optionally download the example data to run the examples
-   # Note: This will slowdown the clonining process, as it includes large files.
-   git submodule update --init --recursive
-   ```
-   
-
-2. **Create a Virtual Environment:**
-   It's recommended to use a virtual environment to manage dependencies.
-   ```bash
-   conda create -n SpaTrack2 python=3.11
-   conda activate SpaTrack2
-   ```
-
-3. **Install Dependencies:**
-
-   Install the torch dependencies `pip` (tested with `torch2.4`).
-   ```bash
-   python -m pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu124
-   ```
-
-   Install the required Python packages using `pip`.
-   ```bash
-   python -m pip install -r requirements.txt
-   ```
-
-By following these steps, you should have a working environment ready to run the SpaTrack model.
-
-
-## Quick Start
-Here are two examples of how to use `SpaTrack2`. 
-### Type1: Monocular video as input *(Example0)*
-```
-python inference.py --data_type="RGB" --data_dir="examples" --video_name="protein" --fps=3
+```bash
+python train.py \
+  --model_type=3dspa \
+  --checkpoint_dir=./checkpoints/3dspa \
+  --wandb_project=3dspa \
+  --wandb_run_name=3dspa_full \
+  --batch_size=64 \
+  --learning_rate=1e-4 \
+  --num_epochs=300 \
+  --num_output_frames=150 \
+  --use_dino=True \
+  --use_depth=True
 ```
 
-### Type2: RGBD video + Camera poses as input *(Example1)*
-We provide an example with Depth and Camera poses from [MegaSAM](https://github.com/mega-sam/mega-sam). 
-First, download the `examples` via:
-```
-sh scripts/download.sh
-```   
-Then run inference with the command with below:
-```
-python inference.py --data_type="RGBD" --data_dir="assets/example1" --video_name="snowboard" --fps=1
-```  
+## Evaluation
 
+### TAPVid-3D Evaluation
 
-### Visualize your results
-Guidance will be displayed in the terminal after running `inference.py`.
+The evaluation script uses the official TAPVid-3D metrics from the [tapnet repository](https://github.com/google-deepmind/tapnet).
 
-## 🌟 Recommended: Gradio Demo with SAM 🌟
-Please follow the instructions in the [app_3rd README](app_3rd/README.md) to configure the dependencies. Then, install the required packages: 
-```
-python -m pip install gradio==5.31.0 pako
-```
-Our Gradio demo enables users to easily track points on the target object. Just try:
-```
-python app.py
+```bash
+python evaluate_tapvid3d.py \
+  --checkpoint_path=./checkpoints/3dspa/checkpoint_100000 \
+  --dataset_path=./data/tapvid3d_dataset \
+  --output_dir=./eval_results \
+  --batch_size=8 \
+  --use_dino=True \
+  --use_depth=True \
+  --depth_scalings=median,per_trajectory \
+  --data_sources=drivetrack,adt,pstudio \
+  --use_minival=True
 ```
 
+**Metrics computed:**
+- `occlusion_accuracy`: Accuracy of occlusion predictions
+- `pts_within_{1,2,4,8,16}`: Fraction of points within pixel thresholds
+- `jaccard_{1,2,4,8,16}`: Jaccard metric for each threshold
+- `average_jaccard`: Average across all thresholds
+- `average_pts_within_thresh`: Average across all thresholds
 
+## Data Format
+
+### Training Data (Kubric3D for 3DSPA)
+- `video`: [T, H, W, 3] RGB frames
+- `tracks_3d`: [N, T, 3] 3D point tracks (x, y, z)
+- `visible`: [N, T, 1] visibility flags
+- `dino_features`: [N, T, 768] optional DINOv2 features
+- `depth_features`: [N, T, 256] optional depth features
+
+### Evaluation Data (TAPVid-3D)
+- `video`: [T, H, W, 3] RGB frames
+- `query_points`: [Q, 4] (t, x, y, z) query points
+- `query_tracks`: [Q, T, 3] ground truth 3D tracks
+- `query_tracks_visible`: [Q, T, 1] visibility flags
+- `support_tracks`: [N, T, 3] support 3D tracks
+- `support_tracks_visible`: [N, T, 1] support visibility
+
+## Citation
+
+If you use this code, please cite our paper:
+
+<!-- ```bibtex
+``` -->
+
+
+## Acknowledgments
+
+This work builds on 
+- [TRAJAN](https://github.com/google-deepmind/tapnet) 
+- [TAPVid-3D](https://github.com/google-deepmind/tapnet/tree/main/tapnet/tapvid3d) benchmark.
