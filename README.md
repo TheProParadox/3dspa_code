@@ -8,10 +8,10 @@ This repository contains the implementation of **3DSPA** (3D Semantic Point Auto
 
 - [x] Training code implemented
 - [x] Model weights released
+- [x] Inference code released
 - [x] TAPVid-3D evaluation implemented
-- [ ] Other evaluations (VideoPhy-2, EvalCrafter, IntPhys2) remaining
-- [ ] Visualization tools remaining
-- [ ] Colab demo remaining
+- [x] Visualization tools implemented
+- [ ] Colab demo implemented
 
 ## Installation
 
@@ -42,6 +42,8 @@ pip install cotracker
 - `inference.py`: Inference script for single videos with DINOv2 and VideoDepthAnything
 - `evaluate_tapvid3d.py`: TAPVid-3D evaluation script
 - `data_loader.py`: Data loading utilities
+- `visualize.py`: Visualization utilities for 3D point tracks
+- `visualizer.py`: CLI tool for visualizing point tracks on video
 
 ## Training
 
@@ -105,6 +107,82 @@ python inference.py \
   - Download model checkpoint (e.g., `depth_anything_vitb14.pth`)
   - Specify path with `--vda_model_path` or place in `checkpoints/` directory
 
+## Visualization
+
+### Visualizing Point Tracks on Video
+
+The visualization tool projects 3D point tracks to 2D image coordinates and visualizes them on video frames with color coding based on scores (e.g., `coords_score` metric). Colors range from Red (low scores) → White (0.5) → Blue (high scores).
+
+**Using the CLI tool:**
+
+```bash
+python visualizer.py \
+  --npz_path=./results/example_result_with_scores.npz \
+  --output_dir=./visualizations \
+  --trail=5 \
+  --point_size=2 \
+  --normalize_scores \
+  --save_frames
+```
+
+**Arguments:**
+- `--npz_path`: Path to .npz file containing `coords`, `coords_score`, `video`, `intrinsics`, `extrinsics`
+- `--output_dir`: Output directory (default: same as npz file directory)
+- `--output_name`: Output video name (default: `{npz_stem}_visualized.mp4`)
+- `--trail`: Number of frames for trail (default: 5)
+- `--point_size`: Radius of points (default: 2)
+- `--resize_height`, `--resize_width`: Dimensions for projection scaling (default: 1024)
+- `--fps`: Frames per second for output video (default: 10)
+- `--normalize_scores`: Normalize scores to [0, 1] range (default: True)
+- `--no_normalize_scores`: Use raw scores (must be in [0, 1] range)
+- `--save_frames`: Save individual frames as PNG images
+
+**Using the Python module:**
+
+```python
+from visualize import (
+    load_visualization_data,
+    prepare_video_for_visualization,
+    project_all_tracks,
+    paint_point_track_with_colors
+)
+import cv2
+
+# Load data
+data = load_visualization_data("results/example_result_with_scores.npz")
+
+# Prepare video and project tracks
+video_rgb, video_bgr = prepare_video_for_visualization(data['video'])
+tracks_2d = project_all_tracks(
+    data['coords'], data['intrinsics'], data['extrinsics'],
+    original_height=video_rgb.shape[1],
+    original_width=video_rgb.shape[2]
+)
+
+# Normalize scores
+scores = data['coords_score']
+scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+
+# Visualize
+video_viz = paint_point_track_with_colors(
+    video_bgr, tracks_2d, data['visibs'].T, scores,
+    trail=5, point_size=2
+)
+
+# Convert to RGB and save
+video_viz_rgb = np.array([cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in video_viz])
+imageio.mimsave("output.mp4", video_viz_rgb, fps=10)
+```
+
+**Output:**
+- `{output_name}.mp4`: Visualized video with colored point tracks
+- `{output_name}/frame_*.png`: Individual frames (if `--save_frames` is used)
+
+**Color Mapping:**
+- Red (0): Low scores
+- White (0.5): Medium scores
+- Blue (1.0): High scores
+
 ## Evaluation
 
 ### TAPVid-3D Evaluation
@@ -130,6 +208,19 @@ python evaluate_tapvid3d.py \
 - `jaccard_{1,2,4,8,16}`: Jaccard metric for each threshold
 - `average_jaccard`: Average across all thresholds
 - `average_pts_within_thresh`: Average across all thresholds
+
+### Other Evaluations
+
+Inference can be performed on other video understanding benchmarks:
+
+- **VideoPhy-2**: [Dataset Link](https://huggingface.co/datasets/videophysics/videophy2_test) - Video physics understanding benchmark.
+- **EvalCrafter**: [Dataset Link](https://huggingface.co/datasets/RaphaelLiu/EvalCrafter_T2V_Dataset) - Video generation evaluation benchmark. 
+- **IntPhys2**: [Dataset Link](https://huggingface.co/datasets/facebook/IntPhys2) - Intuitive physics benchmark. 
+
+For all benchmarks, follow the same inference pipeline:
+1. Prepare data in the required format
+2. Run `inference.py` with the appropriate checkpoint
+3. Process results using the evaluation metrics specific to each benchmark
 
 ## Data Format
 

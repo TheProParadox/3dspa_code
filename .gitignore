@@ -1,9 +1,8 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Distribution / packaging
+*.so
 .Python
 build/
 develop-eggs/
@@ -17,8 +16,84 @@ parts/
 sdist/
 var/
 wheels/
+pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# WandB
+wandb/
+.wandb/
+
+# Checkpoints and outputs
+checkpoints/
+*.pth
+*.pkl
+*.ckpt
+*.safetensors
+*.h5
+*.hdf5
+results/
+outputs/
+inference_output/
+visualizations/
+eval_results/
+
+# Data
+data/
+datasets/
+*.npz
+*.npy
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+
+# Model weights
+models/
+weights/
+
+# JAX compilation cache
+.jax_cache/
+
+# VideoDepthAnything
+VideoDepthAnything/
+depth_anything*.pth
+
+# TapNet
+tapnet/
