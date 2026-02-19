@@ -447,8 +447,22 @@ def sample_depth_features_for_tracks(depth: np.ndarray, tracks_2d: np.ndarray) -
     return track_depth.astype(np.float32)
 
 
+def _unflatten_params(flat_dict: dict) -> dict:
+    """Convert flat keys like 'Dense_0/kernel' to nested dict structure."""
+    result = {}
+    for key, value in flat_dict.items():
+        parts = key.split('/')
+        d = result
+        for part in parts[:-1]:
+            if part not in d:
+                d[part] = {}
+            d = d[part]
+        d[parts[-1]] = value
+    return result
+
+
 def load_checkpoint(checkpoint_path: str, model) -> Any:
-    """Load model checkpoint using Flax checkpoints.
+    """Load model checkpoint. Supports Flax format and .npz (3dspa_ckpt.npz).
     
     Returns:
         params: Model parameters
@@ -458,15 +472,35 @@ def load_checkpoint(checkpoint_path: str, model) -> Any:
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     
-    # Try to restore checkpoint
+    # Handle .npz format (e.g. 3dspa_ckpt.npz from Google Drive)
+    if checkpoint_path.endswith('.npz'):
+        try:
+            data = np.load(checkpoint_path, allow_pickle=True)
+            if 'params' in data:
+                p = data['params']
+                params = p.item() if hasattr(p, 'item') and p.ndim == 0 else dict(p)
+            elif 'optimizer' in data:
+                opt = data['optimizer']
+                opt = opt.item() if hasattr(opt, 'item') and opt.ndim == 0 else dict(opt)
+                params = opt.get('target', opt) if isinstance(opt, dict) else opt
+            else:
+                flat = {k: np.array(data[k]) for k in data.files}
+                params = _unflatten_params(flat)
+            return params
+        except Exception as e:
+            logging.error(f"Failed to load .npz checkpoint: {e}")
+            raise
+    
+    # Flax checkpoint format
     try:
         state_dict = checkpoints.restore_checkpoint(checkpoint_path, target=None)
+        if state_dict is None:
+            raise ValueError(f"Checkpoint at {checkpoint_path} is empty or invalid")
         if 'params' in state_dict:
             params = state_dict['params']
         elif 'optimizer' in state_dict and 'target' in state_dict['optimizer']:
             params = state_dict['optimizer']['target']
         else:
-            # Assume the checkpoint is just params
             params = state_dict
         return params
     except Exception as e:

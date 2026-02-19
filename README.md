@@ -34,6 +34,10 @@ git clone https://github.com/facebookresearch/co-tracker.git
 pip install ./co-tracker
 ```
 
+### Download 3DSPA Checkpoint
+
+Download the 3DSPA model weights from [Google Drive](https://drive.google.com/file/d/1sd3_MuXDXw6TKbay2rh0EjHg3Pbe9RFr/view?usp=sharing). Place it in `./checkpoints/` or specify the path with `--checkpoint_path`.
+
 ## Files
 
 - `track_autoencoder.py`: TRAJAN model (2D point track autoencoder)
@@ -72,7 +76,7 @@ The inference script processes a single video with DINOv2 and VideoDepthAnything
 
 ```bash
 python inference.py \
-  --checkpoint_path=./checkpoints/3dspa/checkpoint_100000 \
+  --checkpoint_path=./checkpoints/3dspa_ckpt.npz \
   --video_path=./data/example_video.mp4 \
   --output_dir=./inference_output \
   --use_dino=True \
@@ -191,7 +195,7 @@ The evaluation script uses the official TAPVid-3D metrics from the [tapnet repos
 
 ```bash
 python evaluate_tapvid3d.py \
-  --checkpoint_path=./checkpoints/3dspa/checkpoint_100000 \
+  --checkpoint_path=./checkpoints/3dspa_ckpt.npz \
   --dataset_path=./data/tapvid3d_dataset \
   --output_dir=./eval_results \
   --batch_size=8 \
