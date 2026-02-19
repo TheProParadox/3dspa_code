@@ -80,7 +80,7 @@ python inference.py \
   --num_query_points=512 \
   --num_support_tracks=2048 \
   --tracking_grid_size=64 \
-  --vda_model_path=./checkpoints/depth_anything_vitb14.pth
+  --vda_model_path=./checkpoints/video_depth_anything_vitb.pth
 ```
 
 **Features:**
@@ -98,14 +98,13 @@ python inference.py \
 **Dependencies:**
 - **CoTracker3**: For 2D point track extraction
   - Install: `git clone https://github.com/facebookresearch/co-tracker.git` then `pip install ./co-tracker`
-  - Alternatively, use BootsTAPIR from tapnet repository
 - **DINOv2**: For semantic feature extraction
   - Automatically installed via `transformers` package
   - Uses `facebook/dinov2-base` model by default
   - Can specify different model with `--dino_model` flag
 - **VideoDepthAnything**: For depth estimation
   - Install: `git clone https://github.com/DepthAnything/Video-Depth-Anything.git`
-  - Download model checkpoint (e.g., `depth_anything_vitb14.pth`)
+  - Download model checkpoint (e.g., `video_depth_anything_vitb.pth` from [HuggingFace](https://huggingface.co/depth-anything/Video-Depth-Anything-Base))
   - Specify path with `--vda_model_path` or place in `checkpoints/` directory
 
 ## Visualization

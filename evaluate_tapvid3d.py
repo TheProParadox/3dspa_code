@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import tqdm
+from flax.training import checkpoints
 
 # Import TAPVid-3D metrics from tapnet repository
 from tapnet.tapvid3d.evaluation import metrics as tapvid3d_metrics
@@ -244,11 +245,15 @@ def evaluate_model(
 
 
 def load_checkpoint(checkpoint_path):
-  """Load model checkpoint. Implement based on your checkpoint format."""
-  # Example: from flax.training import checkpoints
-  # state_dict = checkpoints.restore_checkpoint(checkpoint_path, target=None)
-  # return state_dict['params']
-  raise NotImplementedError('Implement checkpoint loading')
+  """Load model checkpoint using Flax checkpoints."""
+  if not os.path.exists(checkpoint_path):
+    raise FileNotFoundError(f'Checkpoint not found: {checkpoint_path}')
+  state_dict = checkpoints.restore_checkpoint(checkpoint_path, target=None)
+  if 'params' in state_dict:
+    return state_dict['params']
+  if 'optimizer' in state_dict and 'target' in state_dict['optimizer']:
+    return state_dict['optimizer']['target']
+  return state_dict
 
 
 def main(argv):

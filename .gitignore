@@ -91,9 +91,11 @@ weights/
 # JAX compilation cache
 .jax_cache/
 
-# VideoDepthAnything
+# VideoDepthAnything / Video-Depth-Anything
 VideoDepthAnything/
+Video-Depth-Anything/
 depth_anything*.pth
+video_depth_anything*.pth
 
 # TapNet
 tapnet/

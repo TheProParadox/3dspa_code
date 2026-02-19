@@ -10,7 +10,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import cv2
-from PIL import Image
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
@@ -24,33 +23,25 @@ except ImportError:
     DINO_AVAILABLE = False
     logging.warning("transformers not installed. DINO features will not be available.")
 
-# CoTracker3 imports
+# CoTracker3 imports (required for 2D point tracking)
+# Install from: git clone https://github.com/facebookresearch/co-tracker.git && pip install ./co-tracker
 COTRACKER_AVAILABLE = False
-USE_TAPIR = False
 try:
     import cotracker
     COTRACKER_AVAILABLE = True
 except ImportError:
-    try:
-        # Try importing from tapnet if available
-        import sys
-        if 'tapnet' not in sys.path:
-            sys.path.append('tapnet')
-        from tapnet.torch import tapir_model
-        COTRACKER_AVAILABLE = True
-        USE_TAPIR = True
-    except ImportError:
-        pass
+    pass
 
 VDA_AVAILABLE = False
 try:
     import sys
     # Try to import VideoDepthAnything from common installation paths
-    vda_paths = ['VideoDepthAnything', '../VideoDepthAnything', './VideoDepthAnything']
+    # Clone from: https://github.com/DepthAnything/Video-Depth-Anything
+    vda_paths = ['Video-Depth-Anything', '../Video-Depth-Anything', './Video-Depth-Anything']
     for vda_path in vda_paths:
         if os.path.exists(vda_path) and vda_path not in sys.path:
-            sys.path.append(vda_path)
-    from videodepthanything import VideoDepthAnything
+            sys.path.insert(0, vda_path)
+    from video_depth_anything.video_depth import VideoDepthAnything
     VDA_AVAILABLE = True
 except ImportError:
     pass
@@ -69,7 +60,8 @@ flags.DEFINE_integer('num_query_points', 512, 'Number of query points to predict
 flags.DEFINE_integer('num_support_tracks', 2048, 'Number of support tracks')
 flags.DEFINE_integer('tracking_grid_size', 64, 'Grid size for dense tracking')
 flags.DEFINE_string('dino_model', 'facebook/dinov2-base', 'DINOv2 model name')
-flags.DEFINE_string('vda_model_path', None, 'Path to VideoDepthAnything model')
+flags.DEFINE_string('vda_model_path', None, 'Path to VideoDepthAnything checkpoint (.pth)')
+flags.DEFINE_string('vda_encoder', 'vitb', 'VideoDepthAnything encoder: vits, vitb, or vitl')
 
 
 def load_video(video_path: str, max_frames: Optional[int] = None) -> np.ndarray:
@@ -112,8 +104,8 @@ def extract_2d_tracks_cotracker(video: np.ndarray) -> Dict[str, np.ndarray]:
     
     if not COTRACKER_AVAILABLE:
         raise RuntimeError(
-            "CoTracker3 not available. Install: pip install cotracker "
-            "or ensure tapnet is in PYTHONPATH"
+            "CoTracker3 not available. Install from: "
+            "git clone https://github.com/facebookresearch/co-tracker.git && pip install ./co-tracker"
         )
     
     T, H, W = video.shape[:3]
@@ -223,7 +215,7 @@ def extract_dino_features(video: np.ndarray, model=None, processor=None) -> np.n
     return np.array(all_features)  # [T, H_patches, W_patches, 768]
 
 
-def extract_depth_features(video: np.ndarray, vda_model=None) -> np.ndarray:
+def extract_depth_features(video: np.ndarray, vda_model=None, fps: float = 30.0) -> np.ndarray:
     """Extract depth maps using VideoDepthAnything.
     
     Returns:
@@ -235,20 +227,31 @@ def extract_depth_features(video: np.ndarray, vda_model=None) -> np.ndarray:
     if not VDA_AVAILABLE:
         raise RuntimeError(
             "VideoDepthAnything not available. "
-            "Install from: https://github.com/DepthAnything/VideoDepthAnything"
+            "Install from: https://github.com/DepthAnything/Video-Depth-Anything"
         )
     
     logging.info("Extracting depth features using VideoDepthAnything...")
+    
+    # Model configs for Video-Depth-Anything (relative depth)
+    VDA_MODEL_CONFIGS = {
+        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+    }
+    encoder = FLAGS.vda_encoder
+    if encoder not in VDA_MODEL_CONFIGS:
+        raise ValueError(f"vda_encoder must be one of {list(VDA_MODEL_CONFIGS.keys())}")
     
     # Initialize model if not provided
     if vda_model is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         model_path = FLAGS.vda_model_path
         if model_path is None:
-            # Try default paths
+            # Try default paths (Video-Depth-Anything checkpoint names)
             default_paths = [
-                'checkpoints/depth_anything_vitb14.pth',
-                'VideoDepthAnything/checkpoints/depth_anything_vitb14.pth',
+                f'checkpoints/video_depth_anything_{encoder}.pth',
+                f'Video-Depth-Anything/checkpoints/video_depth_anything_{encoder}.pth',
+                './checkpoints/video_depth_anything_vitb.pth',
             ]
             for path in default_paths:
                 if os.path.exists(path):
@@ -256,24 +259,26 @@ def extract_depth_features(video: np.ndarray, vda_model=None) -> np.ndarray:
                     break
             if model_path is None:
                 raise FileNotFoundError(
-                    "VideoDepthAnything model not found. "
-                    "Specify path with --vda_model_path"
+                    "VideoDepthAnything model not found. Specify path with --vda_model_path. "
+                    "Download from: https://huggingface.co/depth-anything/Video-Depth-Anything-Base"
                 )
-        vda_model = VideoDepthAnything(model_path, device=device)
+        vda_model = VideoDepthAnything(**VDA_MODEL_CONFIGS[encoder], metric=False)
+        vda_model.load_state_dict(torch.load(model_path, map_location='cpu'), strict=True)
+        vda_model = vda_model.to(device).eval()
     
     T, H, W = video.shape[:3]
-    depth_maps = []
     
-    for t in range(T):
-        frame = video[t].astype(np.uint8)
-        # VideoDepthAnything expects RGB image as numpy array
-        depth = vda_model.infer_image(frame)
-        # depth is [H, W] or [H, W, 1]
-        if len(depth.shape) == 2:
-            depth = depth[..., np.newaxis]
-        depth_maps.append(depth)
-    
-    depth_array = np.array(depth_maps).astype(np.float32)  # [T, H, W, 1]
+    # VideoDepthAnything.infer_video_depth expects frames as numpy [T, H, W, 3]
+    # and returns (depths [T, H, W], fps)
+    depths, _ = vda_model.infer_video_depth(
+        video.astype(np.float32) / 255.0,
+        fps,
+        input_size=518,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        fp32=False,
+    )
+    # depths: [T, H, W] -> [T, H, W, 1]
+    depth_array = depths[..., np.newaxis].astype(np.float32)
     logging.info(f"Extracted depth maps: {depth_array.shape}")
     
     return depth_array
@@ -496,7 +501,7 @@ def run_inference(video_path: str, checkpoint_path: str) -> Dict[str, Any]:
     # Extract depth
     depth = None
     if FLAGS.use_depth:
-        depth = extract_depth_features(video)
+        depth = extract_depth_features(video, fps=fps)
         logging.info(f"Extracted depth maps: {depth.shape}")
     
     # Lift 2D tracks to 3D

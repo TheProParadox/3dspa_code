@@ -31,8 +31,8 @@ torchvision>=0.15.0
 transformers>=4.30.0
 
 # VideoDepthAnything for depth estimation
-# Install from: https://github.com/DepthAnything/VideoDepthAnything
-# Or use: pip install git+https://github.com/DepthAnything/VideoDepthAnything.git
+# Install from: https://github.com/DepthAnything/Video-Depth-Anything
+# git clone https://github.com/DepthAnything/Video-Depth-Anything.git
 opencv-python>=4.8.0
 opencv-contrib-python>=4.8.0
 
