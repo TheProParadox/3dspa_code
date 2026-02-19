@@ -29,8 +29,9 @@ git clone https://github.com/google-deepmind/tapnet.git
 export PYTHONPATH="${PYTHONPATH}:$(pwd)/tapnet"
 
 # For inference: 2D point tracking
-# CoTracker3
-pip install cotracker
+# CoTracker3 (install from GitHub)
+git clone https://github.com/facebookresearch/co-tracker.git
+pip install ./co-tracker
 ```
 
 ## Files
@@ -96,14 +97,14 @@ python inference.py \
 
 **Dependencies:**
 - **CoTracker3**: For 2D point track extraction
-  - Install: `pip install cotracker`
+  - Install: `git clone https://github.com/facebookresearch/co-tracker.git` then `pip install ./co-tracker`
   - Alternatively, use BootsTAPIR from tapnet repository
 - **DINOv2**: For semantic feature extraction
   - Automatically installed via `transformers` package
   - Uses `facebook/dinov2-base` model by default
   - Can specify different model with `--dino_model` flag
 - **VideoDepthAnything**: For depth estimation
-  - Install: `git clone https://github.com/DepthAnything/VideoDepthAnything.git`
+  - Install: `git clone https://github.com/DepthAnything/Video-Depth-Anything.git`
   - Download model checkpoint (e.g., `depth_anything_vitb14.pth`)
   - Specify path with `--vda_model_path` or place in `checkpoints/` directory
 

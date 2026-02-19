@@ -220,13 +220,13 @@ def main():
     # Save video
     print(f"Saving video to {output_video_path}...")
     save_video_opencv(video_viz, output_video_path, fps=args.fps)
-    print(f"✅ Saved visualized video to: {output_video_path}")
+    print(f"Saved visualized video to: {output_video_path}")
     
     # Save frames if requested
     if args.save_frames and output_frames_dir is not None:
         print(f"Saving {T} frames to {output_frames_dir}...")
         save_frames(video_viz_rgb, output_frames_dir)
-        print(f"✅ Saved {T} frames to: {output_frames_dir}")
+        print(f"Saved {T} frames to: {output_frames_dir}")
     
     print("\n🎨 Visualization complete!")
     print(f"   Output video: {output_video_path}")
