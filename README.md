@@ -1,7 +1,5 @@
 # 3DSPA: 3D Semantic Point Autoencoder
 
-> ⚠️ **This repository is under construction** 
-
 This repository contains the implementation of **3DSPA** (3D Semantic Point Autoencoder), a framework for evaluating video realism using semantic-aware 3D point trajectories. 3DSPA extends TRAJAN to 3D by integrating DINOv2 semantic features and depth information, enabling robust assessments of realism, temporal consistency, and physical plausibility in generated videos.
 
 ## Status
@@ -11,7 +9,6 @@ This repository contains the implementation of **3DSPA** (3D Semantic Point Auto
 - [x] Inference code released
 - [x] TAPVid-3D evaluation implemented
 - [x] Visualization tools implemented
-- [ ] Colab demo implemented
 
 ## Installation
 
@@ -36,7 +33,7 @@ pip install ./co-tracker
 
 ### Download 3DSPA Checkpoint
 
-Download the 3DSPA model weights from [Google Drive](https://drive.google.com/file/d/1sd3_MuXDXw6TKbay2rh0EjHg3Pbe9RFr/view?usp=sharing). Place it in `./checkpoints/` or specify the path with `--checkpoint_path`.
+Download the 3DSPA model weights from [Google Drive](https://drive.google.com/file/d/16ZsCJYRnG1gaQkhGdMVPlJNSna9d_4io/view?usp=sharing). Place it in `./checkpoints/` or specify the path with `--checkpoint_path`.
 
 ## Files
 
@@ -242,13 +239,6 @@ For all benchmarks, follow the same inference pipeline:
 - `query_tracks_visible`: [Q, T, 1] visibility flags
 - `support_tracks`: [N, T, 3] support 3D tracks
 - `support_tracks_visible`: [N, T, 1] support visibility
-
-## Citation
-
-If you use this code, please cite our paper:
-
-<!-- ```bibtex
-``` -->
 
 
 ## Acknowledgments
