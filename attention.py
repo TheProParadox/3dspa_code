@@ -1,4 +1,4 @@
-"""Transformer attention modules for 3DSPA."""
+"""Transformer attention modules."""
 
 from __future__ import annotations
 

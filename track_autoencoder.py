@@ -1,4 +1,4 @@
-"""TRAJAN: 2D point track autoencoder."""
+"""TRAJAN: 2D point track autoencoder (Allen et al., 2025)."""
 
 from __future__ import annotations
 

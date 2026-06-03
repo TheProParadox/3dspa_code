@@ -1,681 +1,393 @@
-"""Inference script for 3DSPA on a single video with DINOv2 and VideoDepthAnything."""
+"""
+3DSPA inference pipeline.
+"""
 
 import os
-from typing import Dict, Any, Optional
+import sys
+from typing import Any, Dict, Optional, Tuple
 
 from absl import app
 from absl import flags
 from absl import logging
+import cv2
 import jax
 import jax.numpy as jnp
 import numpy as np
-import cv2
 import torch
-import torch.nn.functional as F
-import torchvision.transforms as transforms
-from flax.training import checkpoints
 
-# DINOv2 imports
-try:
-    from transformers import AutoImageProcessor, AutoModel
-    DINO_AVAILABLE = True
-except ImportError:
-    DINO_AVAILABLE = False
-    logging.warning("transformers not installed. DINO features will not be available.")
-
-# CoTracker3 imports (required for 2D point tracking)
-# Install from: git clone https://github.com/facebookresearch/co-tracker.git && pip install ./co-tracker
-COTRACKER_AVAILABLE = False
-try:
-    import cotracker
-    COTRACKER_AVAILABLE = True
-except ImportError:
-    pass
-
-VDA_AVAILABLE = False
-try:
-    import sys
-    # Try to import VideoDepthAnything from common installation paths
-    # Clone from: https://github.com/DepthAnything/Video-Depth-Anything
-    vda_paths = ['Video-Depth-Anything', '../Video-Depth-Anything', './Video-Depth-Anything']
-    for vda_path in vda_paths:
-        if os.path.exists(vda_path) and vda_path not in sys.path:
-            sys.path.insert(0, vda_path)
-    from video_depth_anything.video_depth import VideoDepthAnything
-    VDA_AVAILABLE = True
-except ImportError:
-    pass
-
-import track_autoencoder_3d
+import track_autoencoder
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('checkpoint_path', None, 'Path to 3DSPA model checkpoint')
-flags.DEFINE_string('video_path', None, 'Path to input video file')
-flags.DEFINE_string('output_dir', './inference_output', 'Output directory for results')
-flags.DEFINE_integer('num_output_frames', 150, 'Number of output frames')
-flags.DEFINE_bool('use_dino', True, 'Use DINOv2 features')
-flags.DEFINE_bool('use_depth', True, 'Use VideoDepthAnything depth features')
-flags.DEFINE_integer('num_query_points', 512, 'Number of query points to predict')
+flags.DEFINE_string('checkpoint_path', None, 'Path to 3DSPA checkpoint (.npz)')
+flags.DEFINE_string('video_path', None, 'Path to input video')
+flags.DEFINE_string('output_dir', './inference_output', 'Output directory')
+flags.DEFINE_integer('num_output_frames', 150,
+                     'Model output length (must match checkpoint)')
+flags.DEFINE_integer('num_query_points', 512, 'Number of query points')
 flags.DEFINE_integer('num_support_tracks', 2048, 'Number of support tracks')
-flags.DEFINE_integer('tracking_grid_size', 64, 'Grid size for dense tracking')
-flags.DEFINE_string('dino_model', 'facebook/dinov2-base', 'DINOv2 model name')
-flags.DEFINE_string('vda_model_path', None, 'Path to VideoDepthAnything checkpoint (.pth)')
-flags.DEFINE_string('vda_encoder', 'vitb', 'VideoDepthAnything encoder: vits, vitb, or vitl')
+flags.DEFINE_integer('tracking_grid_size', 64,
+                     'CoTracker3 grid size (tracks grid_size**2 points)')
+flags.DEFINE_bool('use_dino', True, 'Extract DINOv2 features (saved to output)')
+flags.DEFINE_string('dino_model', 'facebook/dinov2-base', 'HuggingFace DINOv2 model id')
+flags.DEFINE_bool('use_depth', True, 'Extract VDA depth maps (saved to output)')
+flags.DEFINE_string('vda_model_path', None,
+                    'Path to VideoDepthAnything .pth checkpoint')
+flags.DEFINE_string('vda_encoder', 'vitb',
+                    'VideoDepthAnything encoder: vits | vitb | vitl')
 
 
-def load_video(video_path: str, max_frames: Optional[int] = None) -> np.ndarray:
-    """Load video frames from file.
-    
-    Returns:
-        frames: [T, H, W, 3] numpy array of RGB frames
-    """
-    cap = cv2.VideoCapture(video_path)
+# ---- Video I/O ---------------------------------------------------------------
+
+def load_video(
+    path: str, max_frames: Optional[int] = None,
+) -> Tuple[np.ndarray, float]:
+    """Load video as uint8 RGB array.  Returns (frames [T,H,W,3], fps)."""
+    cap = cv2.VideoCapture(path)
     if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {video_path}")
-    
-    frames = []
+        raise ValueError(f"Cannot open video: {path}")
     fps = cap.get(cv2.CAP_PROP_FPS)
-    
+    if fps <= 0:
+        fps = 30.0
+    frames = []
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
         if max_frames and len(frames) >= max_frames:
             break
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frames.append(frame)
-    
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     cap.release()
-    
-    if len(frames) == 0:
-        raise ValueError(f"No frames loaded from video: {video_path}")
-    
-    return np.array(frames), fps
+    if not frames:
+        raise ValueError(f"No frames in video: {path}")
+    return np.stack(frames, axis=0), fps
 
 
-def extract_2d_tracks_cotracker(video: np.ndarray) -> Dict[str, np.ndarray]:
-    """Extract 2D point tracks using CoTracker3.
-    
-    Returns:
-        Dictionary with tracks [N, T, 2] and visible [N, T, 1]
-    """
-    logging.info("Extracting 2D point tracks using CoTracker3...")
-    
-    if not COTRACKER_AVAILABLE:
-        raise RuntimeError(
-            "CoTracker3 not available. Install from: "
-            "git clone https://github.com/facebookresearch/co-tracker.git && pip install ./co-tracker"
-        )
-    
-    T, H, W = video.shape[:3]
+
+def extract_2d_tracks(video: np.ndarray) -> Dict[str, np.ndarray]:
+
+    logging.info("Running CoTracker3 for 2D point tracking ...")
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    # Use CoTracker3
-    tracker = cotracker.CoTracker()
-    tracker = tracker.to(device)
-    tracker.eval()
-    
-    # Convert video to torch tensor [1, T, 3, H, W]
-    video_tensor = torch.from_numpy(video).permute(0, 3, 1, 2).float() / 255.0
-    video_tensor = video_tensor.unsqueeze(0).to(device)
-    
-    # Create dense grid of query points on first frame
-    grid_size = FLAGS.tracking_grid_size
-    query_points = []
-    step_x, step_y = W / grid_size, H / grid_size
-    for i in range(grid_size):
-        for j in range(grid_size):
-            x = (j + 0.5) * step_x
-            y = (i + 0.5) * step_y
-            query_points.append([0, y, x])  # [t, y, x] format for CoTracker
-    
-    query_points = torch.tensor(query_points, device=device).float().unsqueeze(0)
-    
-    # Track points
+
+    tracker = torch.hub.load(
+        "facebookresearch/co-tracker", "cotracker3_offline",
+    )
+    tracker = tracker.to(device).eval()
+
+    vid = (
+        torch.from_numpy(video)
+        .permute(0, 3, 1, 2)      
+        .float().div_(255.0)
+        .unsqueeze(0)  
+        .to(device)
+    )
+
     with torch.no_grad():
-        pred_tracks, pred_visibility = tracker(
-            video=video_tensor,
-            queries=query_points,
-        )
-    
-    # Convert to numpy: [1, N, T, 2] -> [N, T, 2]
-    tracks = pred_tracks[0].cpu().numpy()  # [N, T, 2] in (x, y) format
-    visibility = pred_visibility[0].cpu().numpy()  # [N, T] boolean
-    
-    # Convert visibility to [N, T, 1]
-    visible = visibility[..., np.newaxis].astype(np.float32)
-    
-    logging.info(f"Tracked {tracks.shape[0]} points over {tracks.shape[1]} frames")
-    
+        pred_tracks, pred_vis = tracker(vid, grid_size=FLAGS.tracking_grid_size)
+
+    tracks = pred_tracks[0].permute(1, 0, 2).cpu().numpy()  
+
+    v = pred_vis[0]
+    if v.ndim == 2:                                          
+        v = v.permute(1, 0).unsqueeze(-1)
+    else:                                                     
+        v = v.permute(1, 0, 2)
+    vis = v.cpu().numpy()                                   
+
+    logging.info(f"  {tracks.shape[0]} points, {tracks.shape[1]} frames")
     return {
-        'tracks': tracks.astype(np.float32),
-        'visible': visible,
+        'tracks':  tracks.astype(np.float32),
+        'visible': vis.astype(np.float32),
     }
 
 
-def extract_dino_features(video: np.ndarray, model=None, processor=None) -> np.ndarray:
-    """Extract DINOv2 semantic features for each video frame.
-    
-    Returns:
-        features: [T, H_patches, W_patches, 768] DINOv2 patch features
-    """
-    if not FLAGS.use_dino:
-        return None
-    
-    if not DINO_AVAILABLE:
-        raise RuntimeError("DINOv2 not available. Install: pip install transformers")
-    
-    logging.info("Extracting DINOv2 features...")
-    
-    # Load model if not provided
-    if model is None:
-        processor = AutoImageProcessor.from_pretrained(FLAGS.dino_model)
-        model = AutoModel.from_pretrained(FLAGS.dino_model).eval()
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        model = model.to(device)
-    else:
-        device = next(model.parameters()).device
-    
+
+def extract_dino_features(video: np.ndarray) -> np.ndarray:
+
+    import torchvision.transforms as transforms
+    from transformers import AutoImageProcessor, AutoModel
+
+    logging.info("Extracting DINOv2 features ...")
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    processor = AutoImageProcessor.from_pretrained(FLAGS.dino_model)
+    model = AutoModel.from_pretrained(FLAGS.dino_model).to(device).eval()
+
     T, H, W = video.shape[:3]
-    
-    # DINOv2 patch size is 14 for base model
     patch_size = 14
-    H_patches = H // patch_size
-    W_patches = W // patch_size
-    
-    # Resize video to be divisible by patch size
-    target_H = H_patches * patch_size
-    target_W = W_patches * patch_size
-    
-    transform = transforms.Compose([
+    H_p, W_p = H // patch_size, W // patch_size
+    target_H, target_W = H_p * patch_size, W_p * patch_size
+
+    xform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.Resize((target_H, target_W)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
-    
-    all_features = []
-    
+
+    feats = []
     with torch.no_grad():
         for t in range(T):
-            frame = video[t]
-            input_tensor = transform(frame).unsqueeze(0).to(device)
-            
-            # Extract features
-            outputs = model(input_tensor, output_hidden_states=True)
-            
-            # Get patch features from last hidden state
-            # DINOv2 outputs: [batch, num_patches + 1, dim] (includes CLS token)
-            patch_features = outputs.last_hidden_state[:, 1:, :]  # Remove CLS token
-            patch_features = patch_features.reshape(1, H_patches, W_patches, -1)
-            
-            all_features.append(patch_features.cpu().numpy()[0])
-    
-    return np.array(all_features)  # [T, H_patches, W_patches, 768]
+            inp = xform(video[t]).unsqueeze(0).to(device)
+            out = model(inp, output_hidden_states=True)
+            pf = out.last_hidden_state[:, 1:, :] 
+            pf = pf.reshape(1, H_p, W_p, -1)
+            feats.append(pf.cpu().numpy()[0])
+
+    result = np.stack(feats, axis=0)                 
+    logging.info(f"  DINOv2 features: {result.shape}")
+    return result.astype(np.float32)
 
 
-def extract_depth_features(video: np.ndarray, vda_model=None, fps: float = 30.0) -> np.ndarray:
-    """Extract depth maps using VideoDepthAnything.
-    
-    Returns:
-        depth: [T, H, W, 1] depth maps
-    """
-    if not FLAGS.use_depth:
-        return None
-    
-    if not VDA_AVAILABLE:
-        raise RuntimeError(
-            "VideoDepthAnything not available. "
-            "Install from: https://github.com/DepthAnything/Video-Depth-Anything"
+
+_VDA_CONFIGS = {
+    'vits': {'encoder': 'vits', 'features': 64,
+             'out_channels': [48, 96, 192, 384]},
+    'vitb': {'encoder': 'vitb', 'features': 128,
+             'out_channels': [96, 192, 384, 768]},
+    'vitl': {'encoder': 'vitl', 'features': 256,
+             'out_channels': [256, 512, 1024, 1024]},
+}
+
+
+def extract_depth(video: np.ndarray, fps: float) -> np.ndarray:
+    vda_dirs = [
+        'Video-Depth-Anything', '../Video-Depth-Anything',
+        './Video-Depth-Anything',
+    ]
+    for d in vda_dirs:
+        if os.path.exists(d) and d not in sys.path:
+            sys.path.insert(0, d)
+
+    from video_depth_anything.video_depth import VideoDepthAnything
+
+    enc = FLAGS.vda_encoder
+    if enc not in _VDA_CONFIGS:
+        raise ValueError(f"vda_encoder must be one of {list(_VDA_CONFIGS)}")
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    model_path = FLAGS.vda_model_path
+    if model_path is None:
+        candidates = [
+            f'checkpoints/video_depth_anything_{enc}.pth',
+            f'Video-Depth-Anything/checkpoints/video_depth_anything_{enc}.pth',
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                model_path = p
+                break
+    if model_path is None:
+        raise FileNotFoundError(
+            "VideoDepthAnything checkpoint not found. Use --vda_model_path "
+            "or download from https://huggingface.co/depth-anything/"
+            "Video-Depth-Anything-Base"
         )
-    
-    logging.info("Extracting depth features using VideoDepthAnything...")
-    
-    # Model configs for Video-Depth-Anything (relative depth)
-    VDA_MODEL_CONFIGS = {
-        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-    }
-    encoder = FLAGS.vda_encoder
-    if encoder not in VDA_MODEL_CONFIGS:
-        raise ValueError(f"vda_encoder must be one of {list(VDA_MODEL_CONFIGS.keys())}")
-    
-    # Initialize model if not provided
-    if vda_model is None:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        model_path = FLAGS.vda_model_path
-        if model_path is None:
-            # Try default paths (Video-Depth-Anything checkpoint names)
-            default_paths = [
-                f'checkpoints/video_depth_anything_{encoder}.pth',
-                f'Video-Depth-Anything/checkpoints/video_depth_anything_{encoder}.pth',
-                './checkpoints/video_depth_anything_vitb.pth',
-            ]
-            for path in default_paths:
-                if os.path.exists(path):
-                    model_path = path
-                    break
-            if model_path is None:
-                raise FileNotFoundError(
-                    "VideoDepthAnything model not found. Specify path with --vda_model_path. "
-                    "Download from: https://huggingface.co/depth-anything/Video-Depth-Anything-Base"
-                )
-        vda_model = VideoDepthAnything(**VDA_MODEL_CONFIGS[encoder], metric=False)
-        vda_model.load_state_dict(torch.load(model_path, map_location='cpu'), strict=True)
-        vda_model = vda_model.to(device).eval()
-    
-    T, H, W = video.shape[:3]
-    
-    # VideoDepthAnything.infer_video_depth expects frames as numpy [T, H, W, 3]
-    # and returns (depths [T, H, W], fps)
-    depths, _ = vda_model.infer_video_depth(
-        video.astype(np.float32) / 255.0,
-        fps,
-        input_size=518,
-        device='cuda' if torch.cuda.is_available() else 'cpu',
-        fp32=False,
+
+    logging.info(f"Loading VideoDepthAnything ({enc}) from {model_path}")
+    model = VideoDepthAnything(**_VDA_CONFIGS[enc], metric=False)
+    model.load_state_dict(
+        torch.load(model_path, map_location='cpu', weights_only=True),
+        strict=True,
     )
-    # depths: [T, H, W] -> [T, H, W, 1]
-    depth_array = depths[..., np.newaxis].astype(np.float32)
-    logging.info(f"Extracted depth maps: {depth_array.shape}")
-    
-    return depth_array
+    model = model.to(device).eval()
+
+    depths, _ = model.infer_video_depth(
+        video, fps, input_size=518, device=device,
+    )
+    logging.info(f"  Depth maps: {depths.shape}")
+    return depths.astype(np.float32)
 
 
-def lift_2d_to_3d(tracks_2d: np.ndarray, depth: np.ndarray, intrinsics=None) -> np.ndarray:
-    """Lift 2D tracks to 3D using depth maps and camera intrinsics.
-    
-    Returns:
-        tracks_3d: [N, T, 3] 3D point tracks (x, y, z) in camera coordinates
-    """
-    N, T = tracks_2d.shape[:2]
-    tracks_3d = np.zeros((N, T, 3))
-    
-    # Default intrinsics if not provided
-    if intrinsics is None:
-        H, W = depth.shape[1:3]
-        fx = fy = max(H, W)
-        cx, cy = W / 2, H / 2
-    else:
-        fx, fy, cx, cy = intrinsics
-    
-    # Bilinear interpolation for depth sampling
-    for n in range(N):
-        for t in range(T):
-            x, y = tracks_2d[n, t]
-            
-            # Bilinear interpolation for depth
-            x0, y0 = int(np.floor(x)), int(np.floor(y))
-            x1, y1 = x0 + 1, y0 + 1
-            wx, wy = x - x0, y - y0
-            
-            # Clamp to valid range
-            x0 = np.clip(x0, 0, depth.shape[2] - 1)
-            y0 = np.clip(y0, 0, depth.shape[1] - 1)
-            x1 = np.clip(x1, 0, depth.shape[2] - 1)
-            y1 = np.clip(y1, 0, depth.shape[1] - 1)
-            
-            # Bilinear interpolation
-            z00 = depth[t, y0, x0, 0]
-            z01 = depth[t, y0, x1, 0]
-            z10 = depth[t, y1, x0, 0]
-            z11 = depth[t, y1, x1, 0]
-            
-            z = (z00 * (1 - wx) * (1 - wy) +
-                 z01 * wx * (1 - wy) +
-                 z10 * (1 - wx) * wy +
-                 z11 * wx * wy)
-            
-            # Convert to 3D camera coordinates
-            tracks_3d[n, t, 0] = (x - cx) * z / fx
-            tracks_3d[n, t, 1] = (y - cy) * z / fy
-            tracks_3d[n, t, 2] = z
-    
-    return tracks_3d.astype(np.float32)
 
-
-def sample_dino_features_for_tracks(dino_features: np.ndarray, tracks_2d: np.ndarray, 
-                                     video_shape: tuple) -> np.ndarray:
-    """Sample DINOv2 features at 2D track locations using bilinear interpolation.
-    
-    Args:
-        dino_features: [T, H_patches, W_patches, 768] DINO patch features
-        tracks_2d: [N, T, 2] 2D track positions in original image coordinates
-        video_shape: (T, H, W, 3) original video shape
-    
-    Returns:
-        track_dino_features: [N, T, 768] DINO features per track
-    """
-    if dino_features is None:
-        return None
-    
-    T, H_patches, W_patches, D = dino_features.shape
-    _, H, W, _ = video_shape
-    N = tracks_2d.shape[0]
-    
-    # DINOv2 patch size
-    patch_size = 14
-    scale_h = H_patches / H
-    scale_w = W_patches / W
-    
-    track_features = np.zeros((N, T, D))
-    
-    for n in range(N):
-        for t in range(T):
-            x, y = tracks_2d[n, t]
-            
-            # Convert to patch coordinates
-            patch_x = x * scale_w
-            patch_y = y * scale_h
-            
-            # Bilinear interpolation in patch space
-            x0, y0 = int(np.floor(patch_x)), int(np.floor(patch_y))
-            x1, y1 = x0 + 1, y0 + 1
-            wx, wy = patch_x - x0, patch_y - y0
-            
-            # Clamp to valid range
-            x0 = np.clip(x0, 0, W_patches - 1)
-            y0 = np.clip(y0, 0, H_patches - 1)
-            x1 = np.clip(x1, 0, W_patches - 1)
-            y1 = np.clip(y1, 0, H_patches - 1)
-            
-            # Bilinear interpolation
-            f00 = dino_features[t, y0, x0]
-            f01 = dino_features[t, y0, x1]
-            f10 = dino_features[t, y1, x0]
-            f11 = dino_features[t, y1, x1]
-            
-            track_features[n, t] = (f00 * (1 - wx) * (1 - wy) +
-                                   f01 * wx * (1 - wy) +
-                                   f10 * (1 - wx) * wy +
-                                   f11 * wx * wy)
-    
-    return track_features.astype(np.float32)
-
-
-def sample_depth_features_for_tracks(depth: np.ndarray, tracks_2d: np.ndarray) -> np.ndarray:
-    """Extract depth-based features at 2D track locations.
-    
-    Returns:
-        track_depth_features: [N, T, 256] depth features per track
-    """
-    if depth is None:
-        return None
-    
-    N, T = tracks_2d.shape[:2]
-    track_depth = np.zeros((N, T, 256))
-    
-    for n in range(N):
-        for t in range(T):
-            x, y = tracks_2d[n, t]
-            
-            # Bilinear interpolation for depth
-            x0, y0 = int(np.floor(x)), int(np.floor(y))
-            x1, y1 = x0 + 1, y0 + 1
-            wx, wy = x - x0, y - y0
-            
-            # Clamp to valid range
-            x0 = np.clip(x0, 0, depth.shape[2] - 1)
-            y0 = np.clip(y0, 0, depth.shape[1] - 1)
-            x1 = np.clip(x1, 0, depth.shape[2] - 1)
-            y1 = np.clip(y1, 0, depth.shape[1] - 1)
-            
-            # Bilinear interpolation
-            d00 = depth[t, y0, x0, 0]
-            d01 = depth[t, y0, x1, 0]
-            d10 = depth[t, y1, x0, 0]
-            d11 = depth[t, y1, x1, 0]
-            
-            d = (d00 * (1 - wx) * (1 - wy) +
-                 d01 * wx * (1 - wy) +
-                 d10 * (1 - wx) * wy +
-                 d11 * wx * wy)
-            
-            # Create depth features: depth value, normalized depth, depth gradient, etc.
-            track_depth[n, t, 0] = d
-            track_depth[n, t, 1] = d / 10.0  # Normalized
-            
-            # Depth gradient (simplified)
-            if t > 0:
-                d_prev = track_depth[n, t-1, 0]
-                track_depth[n, t, 2] = d - d_prev  # Temporal gradient
-            
-            # Additional features can be added here
-    
-    return track_depth.astype(np.float32)
-
-
-def _unflatten_params(flat_dict: dict) -> dict:
-    """Convert flat keys like 'Dense_0/kernel' to nested dict structure."""
-    result = {}
-    for key, value in flat_dict.items():
+def _unflatten(flat: Dict[str, np.ndarray]) -> dict:
+    tree: dict = {}
+    for key, val in flat.items():
         parts = key.split('/')
-        d = result
-        for part in parts[:-1]:
-            if part not in d:
-                d[part] = {}
-            d = d[part]
-        d[parts[-1]] = value
-    return result
+        d = tree
+        for p in parts[:-1]:
+            d = d.setdefault(p, {})
+        d[parts[-1]] = jnp.array(val)
+    return tree
 
 
-def load_checkpoint(checkpoint_path: str, model) -> Any:
-    """Load model checkpoint. Supports Flax format and .npz (3dspa_ckpt.npz).
-    
-    Returns:
-        params: Model parameters
-    """
-    logging.info(f"Loading checkpoint from {checkpoint_path}")
-    
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    
-    # Handle .npz format (e.g. 3dspa_ckpt.npz from Google Drive)
-    if checkpoint_path.endswith('.npz'):
-        try:
-            data = np.load(checkpoint_path, allow_pickle=True)
-            if 'params' in data:
-                p = data['params']
-                params = p.item() if hasattr(p, 'item') and p.ndim == 0 else dict(p)
-            elif 'optimizer' in data:
-                opt = data['optimizer']
-                opt = opt.item() if hasattr(opt, 'item') and opt.ndim == 0 else dict(opt)
-                params = opt.get('target', opt) if isinstance(opt, dict) else opt
-            else:
-                flat = {k: np.array(data[k]) for k in data.files}
-                params = _unflatten_params(flat)
-            return params
-        except Exception as e:
-            logging.error(f"Failed to load .npz checkpoint: {e}")
-            raise
-    
-    # Flax checkpoint format
-    try:
-        state_dict = checkpoints.restore_checkpoint(checkpoint_path, target=None)
-        if state_dict is None:
-            raise ValueError(f"Checkpoint at {checkpoint_path} is empty or invalid")
-        if 'params' in state_dict:
-            params = state_dict['params']
-        elif 'optimizer' in state_dict and 'target' in state_dict['optimizer']:
-            params = state_dict['optimizer']['target']
-        else:
-            params = state_dict
+def load_checkpoint(path: str) -> dict:
+    logging.info(f"Loading checkpoint: {path}")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    data = np.load(path, allow_pickle=True)
+
+    if 'params' in data.files:
+        p = data['params']
+        params = p.item() if hasattr(p, 'item') and p.ndim == 0 else dict(p)
         return params
-    except Exception as e:
-        logging.error(f"Failed to load checkpoint: {e}")
-        raise
+
+    flat = {k: np.array(data[k]) for k in data.files}
+    return _unflatten(flat)
 
 
-def run_inference(video_path: str, checkpoint_path: str) -> Dict[str, Any]:
-    """Run 3DSPA inference: extract features, lift to 3D, predict trajectories.
-    
-    Returns:
-        Dictionary with predictions, video, tracks, and depth maps
+def run_inference(
+    video_path: str, checkpoint_path: str,
+) -> Dict[str, Any]:
     """
-    logging.info(f"Loading video from {video_path}")
-    video, fps = load_video(video_path, max_frames=FLAGS.num_output_frames)
+    Run the full 3DSPA inference pipeline.
+    """
+    num_frames = FLAGS.num_output_frames
+
+    video, fps = load_video(video_path)
     T, H, W = video.shape[:3]
-    logging.info(f"Loaded video: {T} frames, {H}x{W} resolution, {fps:.2f} fps")
-    
-    # Extract 2D tracks
-    track_data = extract_2d_tracks_cotracker(video)
-    tracks_2d = track_data['tracks']
-    visible = track_data['visible']
+    logging.info(f"Video: {T} frames, {H}x{W}, {fps:.1f} fps")
+
+    td = extract_2d_tracks(video)
+    tracks_2d = td['tracks']         
+    visible   = td['visible']     
     N = tracks_2d.shape[0]
-    logging.info(f"Extracted {N} 2D point tracks")
-    
-    # Extract DINO features
+
     dino_features = None
     if FLAGS.use_dino:
         dino_features = extract_dino_features(video)
-        logging.info(f"Extracted DINOv2 features: {dino_features.shape}")
-    
-    # Extract depth
+
     depth = None
     if FLAGS.use_depth:
-        depth = extract_depth_features(video, fps=fps)
-        logging.info(f"Extracted depth maps: {depth.shape}")
-    
-    # Lift 2D tracks to 3D
-    if depth is not None:
-        tracks_3d = lift_2d_to_3d(tracks_2d, depth)
-    else:
-        # If no depth, use z=1.0 for all points (assume unit depth)
-        tracks_3d = np.concatenate([tracks_2d, np.ones((N, T, 1))], axis=-1)
-    
-    # Sample features for tracks
-    dino_track_features = None
-    if dino_features is not None:
-        dino_track_features = sample_dino_features_for_tracks(
-            dino_features, tracks_2d, video.shape
+        depth = extract_depth(video, fps)
+
+    T_eff = min(T, num_frames)
+
+    if T < num_frames:
+        pad_len = num_frames - T
+        tracks_2d = np.concatenate(
+            [tracks_2d, np.tile(tracks_2d[:, -1:, :], (1, pad_len, 1))],
+            axis=1,
         )
-    
-    depth_track_features = None
-    if depth is not None:
-        depth_track_features = sample_depth_features_for_tracks(depth, tracks_2d)
-    
-    # Split into support and query tracks
-    indices = np.random.permutation(N)
-    support_indices = indices[:FLAGS.num_support_tracks]
-    query_indices = indices[FLAGS.num_support_tracks:FLAGS.num_support_tracks + FLAGS.num_query_points]
-    
-    support_tracks = tracks_3d[support_indices]
-    support_visible = visible[support_indices]
-    query_tracks = tracks_3d[query_indices]
-    query_visible = visible[query_indices]
-    
-    # Prepare query points (sample from query tracks at random frames)
-    query_points = []
-    for i in range(FLAGS.num_query_points):
-        t = np.random.randint(0, T)
-        x, y, z = query_tracks[i, t]
-        query_points.append([t, x, y, z])
-    query_points = np.array(query_points)
-    
-    # Prepare batch
+        visible = np.concatenate(
+            [visible, np.zeros((N, pad_len, 1), np.float32)], axis=1,
+        )
+    elif T > num_frames:
+        tracks_2d = tracks_2d[:, :num_frames]
+        visible   = visible[:, :num_frames]
+
+    boundary_frame = T_eff
+
+    total_needed = FLAGS.num_support_tracks + FLAGS.num_query_points
+    if total_needed > N:
+        logging.warning(
+            f"Need {total_needed} tracks but only have {N}. "
+            f"Increase --tracking_grid_size (currently {FLAGS.tracking_grid_size})."
+        )
+    n_support = min(FLAGS.num_support_tracks, N)
+    n_query   = min(FLAGS.num_query_points, N - n_support)
+
+    rng = np.random.RandomState(0)
+    perm = rng.permutation(N)
+    sup_idx = perm[:n_support]
+    qry_idx = perm[n_support:n_support + n_query]
+
+    support_tracks  = tracks_2d[sup_idx]
+    support_visible = visible[sup_idx]
+    query_tracks    = tracks_2d[qry_idx]
+
+    query_points = np.zeros((n_query, 3), dtype=np.float32)
+    for i in range(n_query):
+        vis_frames = np.where(visible[qry_idx[i], :T_eff, 0] > 0.5)[0]
+        t = int(rng.choice(vis_frames)) if len(vis_frames) > 0 else 0
+        query_points[i] = [t, query_tracks[i, t, 0], query_tracks[i, t, 1]]
+
     batch = {
-        'support_tracks': jnp.array(support_tracks[np.newaxis]),
-        'support_tracks_visible': jnp.array(support_visible[np.newaxis]),
-        'query_points': jnp.array(query_points[np.newaxis]),
-        'query_tracks': jnp.array(query_tracks[np.newaxis]),
-        'query_tracks_visible': jnp.array(query_visible[np.newaxis]),
-        'boundary_frame': jnp.array([T]),
+        'support_tracks':         jnp.array(support_tracks[None]),
+        'support_tracks_visible': jnp.array(support_visible[None]),
+        'query_points':           jnp.array(query_points[None]),
+        'boundary_frame':         jnp.array([boundary_frame]),
     }
-    
-    if dino_track_features is not None:
-        batch['dino_features'] = jnp.array(dino_track_features[support_indices][np.newaxis])
-    if depth_track_features is not None:
-        batch['depth_features'] = jnp.array(depth_track_features[support_indices][np.newaxis])
-    
-    # Load model and checkpoint
-    logging.info(f"Loading model from {checkpoint_path}")
-    model = track_autoencoder_3d.TrackAutoEncoder3D(
-        num_output_frames=FLAGS.num_output_frames,
-        use_dino=FLAGS.use_dino,
-        use_depth=FLAGS.use_depth,
+
+    logging.info("Initializing 3DSPA model ...")
+    model = track_autoencoder.TrackAutoEncoder(
+        num_output_frames=num_frames,
     )
-    
-    # Initialize model to get parameter structure
-    rng = jax.random.PRNGKey(42)
-    init_params = model.init(rng, batch)['params']
-    
-    # Load actual checkpoint
-    params = load_checkpoint(checkpoint_path, model)
-    
-    # Verify parameter structure matches
-    def check_params_structure(expected, actual, path=""):
+
+    rng_key = jax.random.PRNGKey(42)
+    init_vars = model.init(rng_key, batch)
+    params = load_checkpoint(checkpoint_path)
+
+    def _check_params(expected, actual, path=""):
         if isinstance(expected, dict) and isinstance(actual, dict):
-            for k in expected.keys():
+            for k in expected:
                 if k not in actual:
-                    logging.warning(f"Key {path}.{k} missing in checkpoint")
+                    logging.warning(f"Missing in checkpoint: {path}/{k}")
                 else:
-                    check_params_structure(expected[k], actual[k], f"{path}.{k}")
+                    _check_params(expected[k], actual[k], f"{path}/{k}")
         elif hasattr(expected, 'shape') and hasattr(actual, 'shape'):
             if expected.shape != actual.shape:
-                logging.warning(f"Shape mismatch at {path}: {expected.shape} vs {actual.shape}")
-    
-    check_params_structure(init_params, params)
-    
-    # Run inference
-    logging.info("Running 3DSPA inference...")
-    predictions = model.apply({'params': params}, batch)
-    
-    logging.info("Inference completed successfully")
-    
+                logging.warning(
+                    f"Shape mismatch {path}: "
+                    f"model {expected.shape} vs ckpt {actual.shape}"
+                )
+
+    _check_params(init_vars['params'], params)
+
+    logging.info("Running 3DSPA model ...")
+    outputs = model.apply({'params': params}, batch)
+
+    pred_tracks_2d = np.array(outputs.tracks[0])[:, :T_eff]
+    pred_vis       = np.array(outputs.visible_logits[0])[:, :T_eff]
+    pred_certain   = np.array(outputs.certain_logits[0])[:, :T_eff]
+
+    logging.info("3DSPA inference complete.")
     return {
-        'predictions': predictions,
-        'video': video,
-        'tracks_3d': tracks_3d,
-        'support_tracks': support_tracks,
-        'query_tracks': query_tracks,
-        'depth': depth,
-        'fps': fps,
+        'pred_tracks_2d':    pred_tracks_2d,
+        'pred_visible':      pred_vis,
+        'pred_certain':      pred_certain,
+        'gt_query_2d':       np.array(query_tracks[:, :T_eff]),
+        'support_tracks_2d': np.array(support_tracks[:, :T_eff]),
+        'dino_features':     dino_features,
+        'depth':             depth,
+        'video':             video,
+        'fps':               fps,
+        'query_points':      query_points,
     }
+
 
 
 def save_results(results: Dict[str, Any], output_dir: str):
-    """Save predictions and intermediate results to disk."""
+    """Write predictions.npz and video_info.txt to *output_dir*."""
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Save predictions
-    pred_tracks = np.array(results['predictions'].tracks[0])  # [Q, T, 3]
-    pred_visible = np.array(results['predictions'].visible_logits[0])  # [Q, T, 1]
-    
-    np.savez(
-        os.path.join(output_dir, 'predictions.npz'),
-        tracks_3d=pred_tracks,
-        visible_logits=pred_visible,
-        query_tracks=results['query_tracks'],
-        support_tracks=results['support_tracks'],
+
+    pred_2d = results['pred_tracks_2d']
+    T = pred_2d.shape[1]
+
+    save_dict = dict(
+        pred_tracks_2d=pred_2d,
+        pred_visible=results['pred_visible'],
+        pred_certain=results['pred_certain'],
+        gt_query_2d=results['gt_query_2d'],
+        query_points=results['query_points'],
     )
-    
-    # Save video info
+    if results['dino_features'] is not None:
+        save_dict['dino_features'] = results['dino_features']
+    if results['depth'] is not None:
+        save_dict['depth'] = results['depth']
+
+    np.savez(os.path.join(output_dir, 'predictions.npz'), **save_dict)
+
     with open(os.path.join(output_dir, 'video_info.txt'), 'w') as f:
-        f.write(f"FPS: {results['fps']}\n")
-        f.write(f"Frames: {pred_tracks.shape[1]}\n")
-        f.write(f"Query points: {pred_tracks.shape[0]}\n")
-    
+        f.write(f"fps: {results['fps']}\n")
+        f.write(f"frames: {T}\n")
+        f.write(f"query_points: {pred_2d.shape[0]}\n")
+        f.write(f"dino_features: {results['dino_features'] is not None}\n")
+        f.write(f"depth_maps: {results['depth'] is not None}\n")
+
     logging.info(f"Results saved to {output_dir}")
 
 
+# ---- Entry point --------------------------------------------------------------
 def main(argv):
-    """Main inference function."""
     del argv
-    
     if FLAGS.video_path is None:
-        raise ValueError('Must provide video_path')
+        raise ValueError('--video_path is required')
     if FLAGS.checkpoint_path is None:
-        raise ValueError('Must provide checkpoint_path')
-    
-    # Run inference
+        raise ValueError('--checkpoint_path is required')
+
     results = run_inference(FLAGS.video_path, FLAGS.checkpoint_path)
-    
-    # Save results
     save_results(results, FLAGS.output_dir)
-    
-    logging.info("Inference completed!")
+    logging.info("Done.")
 
 
 if __name__ == '__main__':

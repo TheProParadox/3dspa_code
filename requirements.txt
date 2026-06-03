@@ -1,41 +1,27 @@
-# Core dependencies
 jax>=0.4.20
 jaxlib>=0.4.20
 flax>=0.7.5
 optax>=0.1.7
 numpy>=1.24.0
 einops>=0.7.0
-
-# Training and evaluation
-wandb>=0.15.0
-tensorflow>=2.13.0
-tensorflow-datasets>=4.9.0
-tqdm>=4.66.0
-
-# Data processing
-pillow>=10.0.0
-scipy>=1.11.0
-
-# Utilities
-absl-py>=2.0.0
-ml-collections>=0.1.1
-chex>=0.1.7
-
-# TAPVid-3D evaluation (from tapnet repository)
-# Clone tapnet: git clone https://github.com/google-deepmind/tapnet.git
-# Add to PYTHONPATH: export PYTHONPATH="${PYTHONPATH}:$(pwd)/tapnet"
-
-# DINOv2 for semantic features
 torch>=2.0.0
 torchvision>=0.15.0
 transformers>=4.30.0
-
-# VideoDepthAnything for depth estimation
-# Install from: https://github.com/DepthAnything/Video-Depth-Anything
-# git clone https://github.com/DepthAnything/Video-Depth-Anything.git
 opencv-python>=4.8.0
-opencv-contrib-python>=4.8.0
-
-# For video processing and visualization
 imageio>=2.31.0
 imageio-ffmpeg>=0.4.9
+pyarrow>=22.0.0
+wandb>=0.15.0
+tqdm>=4.66.0
+pillow>=10.0.0
+scipy>=1.11.0
+absl-py>=2.0.0
+ml-collections>=0.1.1
+chex>=0.1.7
+easydict
+xformers; sys_platform == "linux"
+
+# --- External repos (not pip-installable) ---
+# CoTracker3: loaded via torch.hub at runtime; no manual install needed.
+# VideoDepthAnything: clone repo + download checkpoint (see README).
+# TAPVid-3D evaluation: clone tapnet + add to PYTHONPATH (see README).

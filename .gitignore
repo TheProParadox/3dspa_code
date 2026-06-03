@@ -1,101 +1,42 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
+dist/
+build/
 *.egg
-MANIFEST
 
 # Virtual environments
+.venv/
 venv/
 env/
-ENV/
-env.bak/
-venv.bak/
 
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb
-
-# PyCharm
-.idea/
-
-# VS Code
+# IDE
 .vscode/
-
-# WandB
-wandb/
-.wandb/
-
-# Checkpoints and outputs
-checkpoints/
-*.pth
-*.pkl
-*.ckpt
-*.safetensors
-*.h5
-*.hdf5
-results/
-outputs/
-inference_output/
-visualizations/
-eval_results/
-
-# Data
-data/
-datasets/
-*.npz
-*.npy
-*.mp4
-*.avi
-*.mov
-*.mkv
-
-# Logs
-*.log
-logs/
+.idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
-*.swp
-*.swo
-*~
 
-# Temporary files
-*.tmp
-*.bak
-*.cache
+# Checkpoints and model weights
+checkpoints/*.pth
+checkpoints/*.npz
+checkpoints/.cache/
 
-# Model weights
-models/
-weights/
+# Inference / eval outputs
+inference_output/
+eval_results/
+logs/
 
-# JAX compilation cache
-.jax_cache/
-
-# VideoDepthAnything / Video-Depth-Anything
-VideoDepthAnything/
+# External cloned repos (install separately)
+co-tracker/
 Video-Depth-Anything/
-depth_anything*.pth
-video_depth_anything*.pth
-
-# TapNet
 tapnet/
+
+# Torch hub cache
+.cache/
+
+# WandB
+wandb/
