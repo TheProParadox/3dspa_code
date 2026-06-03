@@ -38,10 +38,15 @@ Download the model weights from [Google Drive](https://drive.google.com/file/d/1
 | `inference.py` | Inference pipeline (CoTracker3 + DINOv2 + VideoDepthAnything + 3DSPA) |
 | `evaluate_tapvid3d.py` | TAPVid-3D evaluation script |
 | `data_loader.py` | Data loading utilities |
-| `visualize.py` | Visualization utilities for point tracks |
-| `visualizer.py` | CLI tool for visualizing point tracks on video |
+| `visualize.py` | Library: load `.npz`, project 3D→2D, paint tracks (import in notebooks/scripts) |
+| `visualizer.py` | CLI wrapper around `visualize.py` (writes `{stem}_visualized.mp4`) |
 
 ## Training
+
+Place preprocessed `.npz` clips under `dataset_path/{train,validation}/` (one file per clip).
+Each file must contain at least `tracks_3d` or `tracks` plus `visible` or `visibility`; optional
+`dino_features` and `depth_features` for 3DSPA. TAPVid-3D GT files (`tracks_XYZ`, `visibility`, …)
+work when copied into those folders.
 
 ```bash
 python train.py \
@@ -71,19 +76,15 @@ python inference.py \
   --tracking_grid_size=64 \
   --vda_model_path=./checkpoints/video_depth_anything_vitb.pth
 ```
-
-tracks are passed to the checkpoint; DINOv2 and depth outputs are saved in
-`predictions.npz` for downstream scoring.
-
 ## Visualization
 
-The visualization tool projects point tracks onto video frames with color coding based on scores.
+The tool projects 3D tracks onto video frames with color coding from `coords_score`.
 
 **CLI:**
 
 ```bash
 python visualizer.py \
-  --npz_path=./results/example_result_with_scores.npz \
+  --npz_path=./inference_output/predictions.npz \
   --output_dir=./visualizations \
   --trail=5 \
   --point_size=2 \
@@ -115,7 +116,7 @@ import cv2
 import numpy as np
 import imageio
 
-data = load_visualization_data("results/example_result_with_scores.npz")
+data = load_visualization_data("./inference_output/predictions.npz")
 video_rgb, video_bgr = prepare_video_for_visualization(data['video'])
 tracks_2d = project_all_tracks(
     data['coords'], data['intrinsics'], data['extrinsics'],

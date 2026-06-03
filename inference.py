@@ -1,5 +1,4 @@
-"""
-3DSPA inference pipeline.
+"""3DSPA inference pipeline.
 """
 
 import os
@@ -14,8 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
-
-import track_autoencoder
+import track_autoencoder, track_autoencoder_3d
 
 FLAGS = flags.FLAGS
 
@@ -40,9 +38,7 @@ flags.DEFINE_string('vda_encoder', 'vitb',
 # ---- Video I/O ---------------------------------------------------------------
 
 def load_video(
-    path: str, max_frames: Optional[int] = None,
-) -> Tuple[np.ndarray, float]:
-    """Load video as uint8 RGB array.  Returns (frames [T,H,W,3], fps)."""
+    path: str, max_frames: Optional[int] = None, ) -> Tuple[np.ndarray, float]:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {path}")
@@ -226,8 +222,7 @@ def load_checkpoint(path: str) -> dict:
 
 
 def run_inference(
-    video_path: str, checkpoint_path: str,
-) -> Dict[str, Any]:
+    video_path: str, checkpoint_path: str, ) -> Dict[str, Any]:
     """
     Run the full 3DSPA inference pipeline.
     """
@@ -331,11 +326,15 @@ def run_inference(
     pred_certain   = np.array(outputs.certain_logits[0])[:, :T_eff]
 
     logging.info("3DSPA inference complete.")
+    gt_query_2d = np.array(query_tracks[:, :T_eff])
+    query_visible = visible[qry_idx][:, :T_eff]
+
     return {
         'pred_tracks_2d':    pred_tracks_2d,
         'pred_visible':      pred_vis,
         'pred_certain':      pred_certain,
-        'gt_query_2d':       np.array(query_tracks[:, :T_eff]),
+        'gt_query_2d':       gt_query_2d,
+        'query_visible':     query_visible,
         'support_tracks_2d': np.array(support_tracks[:, :T_eff]),
         'dino_features':     dino_features,
         'depth':             depth,
@@ -345,36 +344,139 @@ def run_inference(
     }
 
 
+_JACCARD_THRESHOLDS = (1, 2, 4, 8, 16)
+
+
+def _video_to_chw(video_uint8: np.ndarray) -> np.ndarray:
+    """uint8 [T,H,W,3] -> float32 [T,3,H,W] in [0, 1]."""
+    v = video_uint8.astype(np.float32) / 255.0
+    return np.transpose(v, (0, 3, 1, 2))
+
+
+def _default_cameras(T: int, H: int, W: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Pinhole intrinsics and identity world-to-camera extrinsics per frame."""
+    focal = float(max(H, W))
+    K = np.array([
+        [focal, 0.0, W / 2.0],
+        [0.0, focal, H / 2.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float32)
+    intrinsics = np.tile(K[None], (T, 1, 1))
+    extrinsics = np.tile(np.eye(4, dtype=np.float32)[None], (T, 1, 1))
+    return intrinsics, extrinsics
+
+
+def _sample_depth_at_tracks(
+    depth: np.ndarray, tracks_nt2: np.ndarray, ) -> np.ndarray:
+    N, T, _ = tracks_nt2.shape
+    H, W = depth.shape[1:3]
+    z = np.zeros((N, T), dtype=np.float32)
+    for t in range(T):
+        for n in range(N):
+            x = int(np.clip(np.round(tracks_nt2[n, t, 0]), 0, W - 1))
+            y = int(np.clip(np.round(tracks_nt2[n, t, 1]), 0, H - 1))
+            z[n, t] = depth[t, y, x]
+    return z
+
+
+def lift_tracks_to_3d(
+    tracks_nt2: np.ndarray, depth: Optional[np.ndarray], ) -> np.ndarray:
+    N, T, _ = tracks_nt2.shape
+    if depth is not None and depth.shape[0] >= T:
+        z = _sample_depth_at_tracks(depth[:T], tracks_nt2)
+    else:
+        z = np.zeros((N, T), dtype=np.float32)
+    coords_tn3 = np.stack(
+        [tracks_nt2[:, :, 0].T, tracks_nt2[:, :, 1].T, z.T], axis=-1,
+    )
+    return coords_tn3.astype(np.float32)
+
+
+def compute_coords_score(
+    pred_nt2: np.ndarray,
+    gt_nt2: np.ndarray,
+    pred_visible_logits: np.ndarray,
+    gt_visible: np.ndarray,
+    thresholds: Tuple[int, ...] = _JACCARD_THRESHOLDS,
+) -> np.ndarray:
+
+    gt_vis = gt_visible[..., 0] if gt_visible.ndim == 3 else gt_visible
+    pred_vis = 1.0 / (1.0 + np.exp(-pred_visible_logits[..., 0]))
+
+    dist = np.linalg.norm(pred_nt2 - gt_nt2, axis=-1)  
+    both_vis = (pred_vis > 0.5) & (gt_vis > 0.5)        
+
+    thresh_hits = []
+    for th in thresholds:
+        thresh_hits.append((dist < th).astype(np.float32) * both_vis)
+    return np.mean(thresh_hits, axis=0).T.astype(np.float32)  
+
+
+def build_visualization_bundle(results: Dict[str, Any]) -> Dict[str, np.ndarray]:
+    pred_nt2 = results['pred_tracks_2d']     
+    gt_nt2 = results['gt_query_2d']      
+    T, N = pred_nt2.shape[1], pred_nt2.shape[0]
+    video_uint8 = results['video'][:T]
+    H, W = video_uint8.shape[1:3]
+
+    depth = results.get('depth')
+    if depth is not None:
+        depth = depth[:T]
+
+    coords = lift_tracks_to_3d(pred_nt2, depth)
+    coords_score = compute_coords_score(
+        pred_nt2, gt_nt2,
+        results['pred_visible'][:, :T],
+        results['query_visible'][:, :T],
+    )
+    intrinsics, extrinsics = _default_cameras(T, H, W)
+    visibs = results['query_visible'][:, :T]
+    if visibs.ndim == 3:
+        visibs = visibs[..., 0]
+
+    bundle = {
+        'coords': coords,
+        'coords_score': coords_score,
+        'video': _video_to_chw(video_uint8),
+        'intrinsics': intrinsics,
+        'extrinsics': extrinsics,
+        'visibs': visibs.T.astype(np.float32), 
+        'pred_tracks_2d': pred_nt2,
+        'gt_query_2d': gt_nt2,
+        'pred_visible': results['pred_visible'][:, :T],
+        'pred_certain': results['pred_certain'][:, :T],
+        'query_points': results['query_points'],
+    }
+    if results['dino_features'] is not None:
+        bundle['dino_features'] = results['dino_features'][:T]
+    if depth is not None:
+        bundle['depth'] = depth
+    return bundle
+
 
 def save_results(results: Dict[str, Any], output_dir: str):
-    """Write predictions.npz and video_info.txt to *output_dir*."""
+    """Write predictions.npz (visualizer-ready) and video_info.txt."""
     os.makedirs(output_dir, exist_ok=True)
 
-    pred_2d = results['pred_tracks_2d']
-    T = pred_2d.shape[1]
-
-    save_dict = dict(
-        pred_tracks_2d=pred_2d,
-        pred_visible=results['pred_visible'],
-        pred_certain=results['pred_certain'],
-        gt_query_2d=results['gt_query_2d'],
-        query_points=results['query_points'],
-    )
-    if results['dino_features'] is not None:
-        save_dict['dino_features'] = results['dino_features']
-    if results['depth'] is not None:
-        save_dict['depth'] = results['depth']
+    save_dict = build_visualization_bundle(results)
+    T = save_dict['coords'].shape[0]
+    N = save_dict['coords'].shape[1]
 
     np.savez(os.path.join(output_dir, 'predictions.npz'), **save_dict)
 
+    aj_mean = float(save_dict['coords_score'].mean())
     with open(os.path.join(output_dir, 'video_info.txt'), 'w') as f:
         f.write(f"fps: {results['fps']}\n")
         f.write(f"frames: {T}\n")
-        f.write(f"query_points: {pred_2d.shape[0]}\n")
-        f.write(f"dino_features: {results['dino_features'] is not None}\n")
-        f.write(f"depth_maps: {results['depth'] is not None}\n")
+        f.write(f"query_points: {N}\n")
+        f.write(f"average_jaccard_proxy: {aj_mean:.4f}\n")
+        f.write(f"dino_features: {'dino_features' in save_dict}\n")
+        f.write(f"depth_maps: {'depth' in save_dict}\n")
 
-    logging.info(f"Results saved to {output_dir}")
+    logging.info(
+        f"Results saved to {output_dir} "
+        f"(coords, coords_score, video, cameras; AJ proxy={aj_mean:.4f})"
+    )
 
 
 # ---- Entry point --------------------------------------------------------------

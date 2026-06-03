@@ -228,7 +228,7 @@ def main():
         save_frames(video_viz_rgb, output_frames_dir)
         print(f"Saved {T} frames to: {output_frames_dir}")
     
-    print("\n🎨 Visualization complete!")
+    print("\nVisualization complete.")
     print(f"   Output video: {output_video_path}")
     if args.save_frames:
         print(f"   Output frames: {output_frames_dir}")

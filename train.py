@@ -261,9 +261,11 @@ def main(argv):
       model_type=FLAGS.model_type,
   )
 
+  if len(train_ds) == 0:
+    raise ValueError(f'No training examples found under {FLAGS.dataset_path}')
+
   dummy_batch = next(iter(train_ds))
-  num_train_samples = len(list(train_ds))
-  steps_per_epoch = num_train_samples // FLAGS.batch_size
+  steps_per_epoch = len(train_ds)
   total_steps = steps_per_epoch * FLAGS.num_epochs
 
   rng, init_rng = jax.random.split(rng)
